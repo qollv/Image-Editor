@@ -35,6 +35,7 @@ pub struct EditorView {
     text_input: String,
     text_pos: Option<[f32; 2]>,
     save_dialog: bool,
+    confirm_open: bool,
     status: String,
 }
 
@@ -83,7 +84,17 @@ impl EditorView {
             text_input: String::new(),
             text_pos: None,
             save_dialog: false,
+            confirm_open: false,
             status: "未打开图片".to_string(),
+        }
+    }
+
+    fn pick_and_open(&mut self, ctx: &egui::Context) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("图片", &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "tga"])
+            .pick_file()
+        {
+            self.open_image(ctx, path);
         }
     }
 
@@ -370,11 +381,10 @@ impl EditorView {
         // 工具栏
         ui.horizontal(|ui| {
             if ui.button("打开图片…").clicked() {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("图片", &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "tga"])
-                    .pick_file()
-                {
-                    self.open_image(ui.ctx(), path);
+                if self.dirty {
+                    self.confirm_open = true;
+                } else {
+                    self.pick_and_open(ui.ctx());
                 }
             }
             ui.separator();
@@ -582,6 +592,26 @@ impl EditorView {
 
         if self.save_dialog {
             self.show_save_dialog(ui.ctx());
+        }
+
+        if self.confirm_open {
+            let mut do_open = false;
+            egui::Window::new("未保存的修改")
+                .collapsible(false)
+                .resizable(false)
+                .show(ui.ctx(), |ui| {
+                    ui.label("当前图片有未保存的修改，确定放弃？");
+                    if ui.button("放弃并打开").clicked() {
+                        self.confirm_open = false;
+                        do_open = true;
+                    }
+                    if ui.button("取消").clicked() {
+                        self.confirm_open = false;
+                    }
+                });
+            if do_open {
+                self.pick_and_open(ui.ctx());
+            }
         }
     }
 }
