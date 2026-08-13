@@ -1,0 +1,14 @@
+[package]
+name = "image-converter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.31"
+image = { version = "0.25", features = ["png", "jpeg", "gif", "bmp", "ico", "tiff", "tga", "webp", "avif", "pnm", "qoi"] }
+rfd = "0.15"
+rayon = "1"
+fontdue = "0.9"
+
+[profile.release]
+opt-level = 2
