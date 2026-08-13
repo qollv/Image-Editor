@@ -26,6 +26,9 @@ pub struct EditorView {
     dirty: bool,
     tool: Tool,
     crop_ratio: (u32, u32),
+    brightness: i32,
+    contrast: f32,
+    saturation: f32,
     zoom: f32,
     pan: egui::Vec2,
     font: fontdue::Font,
@@ -80,6 +83,9 @@ impl EditorView {
             dirty: false,
             tool: Tool::Select,
             crop_ratio: (1, 1),
+            brightness: 0,
+            contrast: 1.0,
+            saturation: 1.0,
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
             font: load_font(),
@@ -447,6 +453,83 @@ impl EditorView {
         self.save_as(&path);
     }
 
+    /// 执行图片级操作并刷新画布纹理。
+    fn apply_image_op(&mut self, ctx: &egui::Context, op: impl FnOnce(&mut EditorDoc)) {
+        if self.doc.is_none() {
+            return;
+        }
+        {
+            let doc = self.doc.as_mut().unwrap();
+            op(doc);
+            self.dirty = true;
+        }
+        self.refresh_texture(ctx);
+    }
+
+    fn show_adjust_menu(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        ui.menu_button("调整", |ui| {
+            if ui.button("旋转 90°").clicked() {
+                self.apply_image_op(&ctx, |d| d.rotate90());
+                ui.close_menu();
+            }
+            if ui.button("旋转 180°").clicked() {
+                self.apply_image_op(&ctx, |d| d.rotate180());
+                ui.close_menu();
+            }
+            if ui.button("旋转 270°").clicked() {
+                self.apply_image_op(&ctx, |d| d.rotate270());
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("水平翻转").clicked() {
+                self.apply_image_op(&ctx, |d| d.flip_horizontal());
+                ui.close_menu();
+            }
+            if ui.button("垂直翻转").clicked() {
+                self.apply_image_op(&ctx, |d| d.flip_vertical());
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("灰度").clicked() {
+                self.apply_image_op(&ctx, |d| d.grayscale());
+                ui.close_menu();
+            }
+            if ui.button("反色").clicked() {
+                self.apply_image_op(&ctx, |d| d.invert());
+                ui.close_menu();
+            }
+            ui.separator();
+            ui.label("亮度:");
+            ui.add(egui::Slider::new(&mut self.brightness, -100..=100));
+            ui.label("对比度:");
+            ui.add(egui::Slider::new(&mut self.contrast, 0.0..=3.0));
+            ui.label("饱和度:");
+            ui.add(egui::Slider::new(&mut self.saturation, 0.0..=3.0));
+            if ui.button("应用调整").clicked() {
+                let (b, c, s) = (self.brightness, self.contrast, self.saturation);
+                self.apply_image_op(&ctx, |d| d.apply_adjustments(b, c, s));
+                self.brightness = 0;
+                self.contrast = 1.0;
+                self.saturation = 1.0;
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("高斯模糊").clicked() {
+                self.apply_image_op(&ctx, |d| d.blur(2.0));
+                ui.close_menu();
+            }
+            if ui.button("锐化").clicked() {
+                self.apply_image_op(&ctx, |d| d.unsharpen(1.5, 10));
+                ui.close_menu();
+            }
+            if ui.button("像素化").clicked() {
+                self.apply_image_op(&ctx, |d| d.pixelate(8));
+                ui.close_menu();
+            }
+        });
+    }
+
     fn show_save_dialog(&mut self, ctx: &egui::Context) {
         let mut close = false;
         egui::Window::new("保存图片")
@@ -534,6 +617,11 @@ impl EditorView {
             }
             ui.separator();
             let has_doc = self.doc.is_some();
+            if has_doc {
+                self.show_adjust_menu(ui);
+            } else {
+                ui.add_enabled(false, egui::Button::new("调整"));
+            }
             if ui.add_enabled(has_doc, egui::Button::new("撤销")).clicked() {
                 {
                     let d = self.doc.as_mut().unwrap();

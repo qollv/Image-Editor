@@ -10,10 +10,10 @@ pub struct CropRect {
     pub h: u32,
 }
 
-/// 撤销栈条目：标注操作用轻量快照，裁剪用完整原图快照（避免每笔都深拷贝整图）。
+/// 撤销栈条目：标注操作用轻量快照，图片级操作（裁剪/调整/滤镜）用完整原图快照。
 enum UndoEntry {
     Annotations(Vec<Annotation>),
-    Crop {
+    Image {
         image: image::DynamicImage,
         annotations: Vec<Annotation>,
     },
@@ -62,8 +62,8 @@ impl EditorDoc {
                         .push(UndoEntry::Annotations(std::mem::take(&mut self.annotations)));
                     self.annotations = prev;
                 }
-                UndoEntry::Crop { image, annotations } => {
-                    self.redo_stack.push(UndoEntry::Crop {
+                UndoEntry::Image { image, annotations } => {
+                    self.redo_stack.push(UndoEntry::Image {
                         image: self.image.clone(),
                         annotations: std::mem::take(&mut self.annotations),
                     });
@@ -83,8 +83,8 @@ impl EditorDoc {
                         .push(UndoEntry::Annotations(std::mem::take(&mut self.annotations)));
                     self.annotations = next;
                 }
-                UndoEntry::Crop { image, annotations } => {
-                    self.undo_stack.push(UndoEntry::Crop {
+                UndoEntry::Image { image, annotations } => {
+                    self.undo_stack.push(UndoEntry::Image {
                         image: self.image.clone(),
                         annotations: std::mem::take(&mut self.annotations),
                     });
@@ -95,19 +95,70 @@ impl EditorDoc {
         }
     }
 
+    /// 图片级编辑：保存当前快照（供后续调整/滤镜/裁剪撤销）。
+    fn begin_image_edit(&mut self) {
+        self.undo_stack.push(UndoEntry::Image {
+            image: self.image.clone(),
+            annotations: self.annotations.clone(),
+        });
+        self.redo_stack.clear();
+    }
+
     pub fn apply_crop(&mut self) {
         if let Some(c) = self.crop.take() {
-            let prev_image = self.image.clone();
-            let prev_annotations = self.annotations.clone();
-            self.undo_stack.push(UndoEntry::Crop {
-                image: prev_image,
-                annotations: prev_annotations,
-            });
-            self.redo_stack.clear();
+            self.begin_image_edit();
             let cropped = self.image.crop_imm(c.x, c.y, c.w, c.h);
             self.image = cropped;
             self.annotations.clear();
         }
+    }
+
+    pub fn rotate90(&mut self) {
+        self.begin_image_edit();
+        self.image = self.image.rotate90();
+    }
+    pub fn rotate180(&mut self) {
+        self.begin_image_edit();
+        self.image = self.image.rotate180();
+    }
+    pub fn rotate270(&mut self) {
+        self.begin_image_edit();
+        self.image = self.image.rotate270();
+    }
+    pub fn flip_horizontal(&mut self) {
+        self.begin_image_edit();
+        self.image = self.image.fliph();
+    }
+    pub fn flip_vertical(&mut self) {
+        self.begin_image_edit();
+        self.image = self.image.flipv();
+    }
+    pub fn grayscale(&mut self) {
+        self.begin_image_edit();
+        self.image = self.image.grayscale();
+    }
+    pub fn invert(&mut self) {
+        self.begin_image_edit();
+        self.image.invert();
+    }
+    /// 一次性应用亮度/对比度/饱和度（单步撤销）。
+    pub fn apply_adjustments(&mut self, brightness: i32, contrast: f32, saturation: f32) {
+        self.begin_image_edit();
+        self.image = self.image.brighten(brightness);
+        self.image = self.image.adjust_contrast(contrast);
+        self.image = saturate_image(&self.image, saturation);
+    }
+    pub fn blur(&mut self, sigma: f32) {
+        self.begin_image_edit();
+        self.image = self.image.blur(sigma);
+    }
+    pub fn unsharpen(&mut self, sigma: f32, threshold: i32) {
+        self.begin_image_edit();
+        self.image = self.image.unsharpen(sigma, threshold);
+    }
+    pub fn pixelate(&mut self, block_size: u32) {
+        self.begin_image_edit();
+        self.image = pixelate_image(&self.image, block_size);
     }
 
     pub fn render(&self, font: Option<&fontdue::Font>) -> image::RgbaImage {
@@ -115,6 +166,98 @@ impl EditorDoc {
         draw::rasterize_all(&self.annotations, &self.style, &mut out, font);
         out
     }
+}
+
+fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+    let (r, g, b) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let v = max;
+    let delta = max - min;
+    let s = if max == 0.0 { 0.0 } else { delta / max };
+    let h = if delta == 0.0 {
+        0.0
+    } else if max == r {
+        60.0 * (((g - b) / delta) % 6.0)
+    } else if max == g {
+        60.0 * ((b - r) / delta + 2.0)
+    } else {
+        60.0 * ((r - g) / delta + 4.0)
+    };
+    (if h < 0.0 { h + 360.0 } else { h }, s, v)
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let c = v * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = v - c;
+    let (r, g, b) = match h {
+        h if h < 60.0 => (c, x, 0.0),
+        h if h < 120.0 => (x, c, 0.0),
+        h if h < 180.0 => (0.0, c, x),
+        h if h < 240.0 => (0.0, x, c),
+        h if h < 300.0 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    (
+        ((r + m) * 255.0).round() as u8,
+        ((g + m) * 255.0).round() as u8,
+        ((b + m) * 255.0).round() as u8,
+    )
+}
+
+fn saturate_image(img: &image::DynamicImage, factor: f32) -> image::DynamicImage {
+    let mut out = img.to_rgb8();
+    for p in out.pixels_mut() {
+        let (h, s, v) = rgb_to_hsv(p[0], p[1], p[2]);
+        let s2 = (s * factor).clamp(0.0, 1.0);
+        let (r, g, b) = hsv_to_rgb(h, s2, v);
+        p[0] = r;
+        p[1] = g;
+        p[2] = b;
+    }
+    image::DynamicImage::ImageRgb8(out)
+}
+
+fn pixelate_image(img: &image::DynamicImage, block_size: u32) -> image::DynamicImage {
+    let src = img.to_rgba8();
+    let (w, h) = (src.width(), src.height());
+    let mut out = image::RgbaImage::new(w, h);
+    let bs = block_size.max(1);
+    let mut by = 0;
+    while by < h {
+        let mut bx = 0;
+        while bx < w {
+            let ex = (bx + bs).min(w);
+            let ey = (by + bs).min(h);
+            let mut sum = [0u32; 4];
+            let mut cnt = 0u32;
+            for y in by..ey {
+                for x in bx..ex {
+                    let p = src.get_pixel(x, y);
+                    sum[0] += p[0] as u32;
+                    sum[1] += p[1] as u32;
+                    sum[2] += p[2] as u32;
+                    sum[3] += p[3] as u32;
+                    cnt += 1;
+                }
+            }
+            let avg = [
+                (sum[0] / cnt) as u8,
+                (sum[1] / cnt) as u8,
+                (sum[2] / cnt) as u8,
+                (sum[3] / cnt) as u8,
+            ];
+            for y in by..ey {
+                for x in bx..ex {
+                    out.put_pixel(x, y, image::Rgba(avg));
+                }
+            }
+            bx += bs;
+        }
+        by += bs;
+    }
+    image::DynamicImage::ImageRgba8(out)
 }
 
 #[cfg(test)]
@@ -192,5 +335,33 @@ mod tests {
         d.push_annotation(Annotation::Brush(vec![[1.0, 1.0], [2.0, 1.0]]));
         let out = d.render(None);
         assert_eq!(out.get_pixel(1, 1), &image::Rgba([255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn rotate90_swaps_dimensions_and_undo() {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(4, 2));
+        let mut d = EditorDoc::new(img);
+        d.rotate90();
+        assert_eq!(d.image.width(), 2);
+        assert_eq!(d.image.height(), 4);
+        d.undo();
+        assert_eq!(d.image.width(), 4);
+        assert_eq!(d.image.height(), 2);
+    }
+
+    #[test]
+    fn grayscale_reduces_color() {
+        // 纯红图灰度后应接近灰
+        let mut img = image::RgbImage::new(2, 2);
+        for p in img.pixels_mut() {
+            *p = image::Rgb([255, 0, 0]);
+        }
+        let mut d = EditorDoc::new(image::DynamicImage::ImageRgb8(img));
+        d.grayscale();
+        let out = d.image.to_rgb8();
+        let p = out.get_pixel(0, 0);
+        // 灰度后 r/g/b 相等（或近似）
+        assert!((p[0] as i32 - p[1] as i32).abs() <= 2, "got {:?}", p);
+        assert!((p[1] as i32 - p[2] as i32).abs() <= 2, "got {:?}", p);
     }
 }
