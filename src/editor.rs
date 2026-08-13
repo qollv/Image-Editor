@@ -10,13 +10,22 @@ pub struct CropRect {
     pub h: u32,
 }
 
+/// 撤销栈条目：标注操作用轻量快照，裁剪用完整原图快照（避免每笔都深拷贝整图）。
+enum UndoEntry {
+    Annotations(Vec<Annotation>),
+    Crop {
+        image: image::DynamicImage,
+        annotations: Vec<Annotation>,
+    },
+}
+
 pub struct EditorDoc {
     pub image: image::DynamicImage,
     pub annotations: Vec<Annotation>,
     pub style: Style,
     pub crop: Option<CropRect>,
-    undo_stack: Vec<Vec<Annotation>>,
-    redo_stack: Vec<Vec<Annotation>>,
+    undo_stack: Vec<UndoEntry>,
+    redo_stack: Vec<UndoEntry>,
 }
 
 impl EditorDoc {
@@ -39,28 +48,56 @@ impl EditorDoc {
     }
 
     pub fn push_annotation(&mut self, a: Annotation) {
-        self.undo_stack.push(self.annotations.clone());
+        self.undo_stack
+            .push(UndoEntry::Annotations(self.annotations.clone()));
         self.redo_stack.clear();
         self.annotations.push(a);
     }
 
     pub fn undo(&mut self) {
-        if let Some(prev) = self.undo_stack.pop() {
-            self.redo_stack.push(std::mem::take(&mut self.annotations));
-            self.annotations = prev;
+        if let Some(entry) = self.undo_stack.pop() {
+            match entry {
+                UndoEntry::Annotations(prev) => {
+                    self.redo_stack
+                        .push(UndoEntry::Annotations(std::mem::take(&mut self.annotations)));
+                    self.annotations = prev;
+                }
+                UndoEntry::Crop { image, annotations } => {
+                    self.redo_stack.push(UndoEntry::Crop {
+                        image: self.image.clone(),
+                        annotations: std::mem::take(&mut self.annotations),
+                    });
+                    self.image = image;
+                    self.annotations = annotations;
+                }
+            }
         }
     }
 
     pub fn redo(&mut self) {
-        if let Some(next) = self.redo_stack.pop() {
-            self.undo_stack.push(std::mem::take(&mut self.annotations));
-            self.annotations = next;
+        if let Some(entry) = self.redo_stack.pop() {
+            match entry {
+                UndoEntry::Annotations(next) => {
+                    self.undo_stack
+                        .push(UndoEntry::Annotations(std::mem::take(&mut self.annotations)));
+                    self.annotations = next;
+                }
+                UndoEntry::Crop { image, annotations } => {
+                    self.undo_stack.push(UndoEntry::Crop {
+                        image: self.image.clone(),
+                        annotations: std::mem::take(&mut self.annotations),
+                    });
+                    self.image = image;
+                    self.annotations = annotations;
+                }
+            }
         }
     }
 
     pub fn remove_last(&mut self) {
         if !self.annotations.is_empty() {
-            self.undo_stack.push(self.annotations.clone());
+            self.undo_stack
+                .push(UndoEntry::Annotations(self.annotations.clone()));
             self.redo_stack.clear();
             self.annotations.pop();
         }
@@ -68,11 +105,16 @@ impl EditorDoc {
 
     pub fn apply_crop(&mut self) {
         if let Some(c) = self.crop.take() {
+            let prev_image = self.image.clone();
+            let prev_annotations = self.annotations.clone();
+            self.undo_stack.push(UndoEntry::Crop {
+                image: prev_image,
+                annotations: prev_annotations,
+            });
+            self.redo_stack.clear();
             let cropped = self.image.crop_imm(c.x, c.y, c.w, c.h);
             self.image = cropped;
             self.annotations.clear();
-            self.undo_stack.clear();
-            self.redo_stack.clear();
         }
     }
 
@@ -120,6 +162,34 @@ mod tests {
         assert_eq!(d.image.width(), 4);
         assert_eq!(d.image.height(), 4);
         assert!(d.crop.is_none());
+    }
+
+    #[test]
+    fn crop_can_be_undone() {
+        let mut d = doc();
+        // 先加一个标注，验证裁剪撤销时标注也一并恢复
+        d.push_annotation(Annotation::Line {
+            start: [0.0, 0.0],
+            end: [5.0, 5.0],
+        });
+        d.crop = Some(CropRect {
+            x: 2,
+            y: 2,
+            w: 4,
+            h: 4,
+        });
+        d.apply_crop();
+        assert_eq!(d.image.width(), 4);
+        assert_eq!(d.annotations.len(), 0);
+        // 撤销裁剪：图像和标注都应恢复
+        d.undo();
+        assert_eq!(d.image.width(), 10);
+        assert_eq!(d.image.height(), 10);
+        assert_eq!(d.annotations.len(), 1);
+        // 重做：再次裁剪
+        d.redo();
+        assert_eq!(d.image.width(), 4);
+        assert_eq!(d.annotations.len(), 0);
     }
 
     #[test]

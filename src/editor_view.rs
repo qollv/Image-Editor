@@ -264,6 +264,20 @@ impl EditorView {
                     egui::StrokeKind::Middle,
                 );
             }
+            Tool::Brush => {
+                // 实时画轨迹（按下即可见，无需等松开）
+                let pts: Vec<egui::Pos2> = self
+                    .brush_pts
+                    .iter()
+                    .map(|p| self.img_to_screen(egui::pos2(p[0], p[1]), origin))
+                    .collect();
+                if pts.len() == 1 {
+                    painter.circle_stroke(pts[0], style.width.max(1.0) / 2.0, stroke);
+                }
+                for w in pts.windows(2) {
+                    painter.line_segment([w[0], w[1]], stroke);
+                }
+            }
             _ => {}
         }
     }
@@ -546,8 +560,26 @@ impl EditorView {
             self.draw_preview(&painter, origin);
         }
 
-        // 鼠标交互
-        if response.drag_started_by(egui::PointerButton::Primary) {
+        // 鼠标交互：按下立即开始绘制（无拖动阈值），松开提交
+        let is_draw_tool = matches!(
+            self.tool,
+            Tool::Brush
+                | Tool::Line
+                | Tool::Arrow
+                | Tool::Rect
+                | Tool::Ellipse
+                | Tool::Crop
+                | Tool::CropRatio
+        );
+        let (pressed, released, down) = ui.input(|i| {
+            (
+                i.pointer.primary_pressed(),
+                i.pointer.primary_released(),
+                i.pointer.primary_down(),
+            )
+        });
+
+        if is_draw_tool && response.hovered() && pressed {
             if let Some(pos) = response.interact_pointer_pos() {
                 self.drawing = true;
                 self.start_img = self.screen_to_img(pos, origin);
@@ -556,11 +588,21 @@ impl EditorView {
                 self.brush_pts.push([self.start_img.x, self.start_img.y]);
             }
         }
-        if response.dragged() {
-            if let Some(pos) = response.interact_pointer_pos() {
+        if self.drawing && down {
+            if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
                 self.cur_img = self.screen_to_img(pos, origin);
                 if self.tool == Tool::Brush {
-                    self.brush_pts.push([self.cur_img.x, self.cur_img.y]);
+                    let dup = self
+                        .brush_pts
+                        .last()
+                        .map(|p| {
+                            (p[0] - self.cur_img.x).abs() < 0.01
+                                && (p[1] - self.cur_img.y).abs() < 0.01
+                        })
+                        .unwrap_or(false);
+                    if !dup {
+                        self.brush_pts.push([self.cur_img.x, self.cur_img.y]);
+                    }
                 }
                 // 比例裁剪：约束宽高比
                 if self.tool == Tool::CropRatio {
@@ -575,7 +617,7 @@ impl EditorView {
                 }
             }
         }
-        if response.drag_stopped_by(egui::PointerButton::Primary) {
+        if self.drawing && released {
             self.commit_drawing();
         }
         // 文字：单击放置
