@@ -15,8 +15,34 @@ pub struct ImageApp {
     editor: EditorView,
 }
 
+/// egui 默认字体不含中文字形，从系统加载中文 TTC/TTF 并设为最高优先级。
+fn setup_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    for path in [
+        "C:\\Windows\\Fonts\\msyh.ttc",
+        "C:\\Windows\\Fonts\\simhei.ttf",
+        "C:\\Windows\\Fonts\\simsun.ttc",
+    ] {
+        if let Ok(bytes) = std::fs::read(path) {
+            fonts.font_data.insert(
+                "chinese".to_owned(),
+                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                fam.insert(0, "chinese".to_owned());
+            }
+            if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+                fam.insert(0, "chinese".to_owned());
+            }
+            break;
+        }
+    }
+    ctx.set_fonts(fonts);
+}
+
 impl ImageApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        setup_fonts(&cc.egui_ctx);
         Self {
             tab: Tab::Convert,
             convert: ConvertView::new(),
