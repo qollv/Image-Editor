@@ -25,10 +25,8 @@ pub struct EditorView {
     dirty: bool,
     tool: Tool,
     crop_ratio: (u32, u32),
-    brightness: i32,
-    contrast: f32,
-    saturation: f32,
-    adjust_base: Option<image::DynamicImage>,
+    /// 调整拖动基准：(拖动前 image, 旧亮度, 旧对比度, 旧饱和度)
+    adjust_base: Option<(image::DynamicImage, i32, f32, f32)>,
     mosaic_block: u32,
     zoom: f32,
     pan: egui::Vec2,
@@ -84,9 +82,6 @@ impl EditorView {
             dirty: false,
             tool: Tool::Select,
             crop_ratio: (1, 1),
-            brightness: 0,
-            contrast: 1.0,
-            saturation: 1.0,
             adjust_base: None,
             mosaic_block: 16,
             zoom: 1.0,
@@ -491,14 +486,18 @@ impl EditorView {
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("亮度:");
-                    let b_resp = ui.add(egui::Slider::new(&mut self.brightness, -100..=100));
-                    ui.label("对比度:");
-                    let c_resp = ui.add(egui::Slider::new(&mut self.contrast, 0.0..=3.0));
-                    ui.label("饱和度:");
-                    let s_resp = ui.add(egui::Slider::new(&mut self.saturation, 0.0..=3.0));
+                    // 滑块直接绑定 doc 的调整值，撤销后会自动跟着恢复
+                    let (b_resp, c_resp, s_resp) = {
+                        let doc = self.doc.as_mut().unwrap();
+                        ui.label("亮度:");
+                        let br = ui.add(egui::Slider::new(&mut doc.brightness, -100..=100));
+                        ui.label("对比度:");
+                        let cr = ui.add(egui::Slider::new(&mut doc.contrast, 0.0..=3.0));
+                        ui.label("饱和度:");
+                        let sr = ui.add(egui::Slider::new(&mut doc.saturation, 0.0..=3.0));
+                        (br, cr, sr)
+                    };
 
-                    // 实时预览：拖动开始保存基准，拖动中实时预览，松手提交一次撤销
                     let drag_started =
                         b_resp.drag_started() || c_resp.drag_started() || s_resp.drag_started();
                     let changed = b_resp.changed() || c_resp.changed() || s_resp.changed();
@@ -506,14 +505,22 @@ impl EditorView {
                         b_resp.drag_stopped() || c_resp.drag_stopped() || s_resp.drag_stopped();
 
                     if drag_started {
+                        // 记录拖动前的完整状态
                         if let Some(doc) = &self.doc {
-                            self.adjust_base = Some(doc.image.clone());
+                            self.adjust_base = Some((
+                                doc.image.clone(),
+                                doc.brightness,
+                                doc.contrast,
+                                doc.saturation,
+                            ));
                         }
                     }
                     if changed {
                         {
-                            if let (Some(doc), Some(base)) = (&mut self.doc, &self.adjust_base) {
-                                let (b, c, s) = (self.brightness, self.contrast, self.saturation);
+                            if let (Some(doc), Some((base, _, _, _))) =
+                                (&mut self.doc, &self.adjust_base)
+                            {
+                                let (b, c, s) = (doc.brightness, doc.contrast, doc.saturation);
                                 doc.preview_adjustments(base, b, c, s);
                                 self.dirty = true;
                             }
@@ -522,26 +529,11 @@ impl EditorView {
                     }
                     if drag_stopped {
                         let base = self.adjust_base.take();
-                        if let (Some(doc), Some(base)) = (&mut self.doc, base) {
-                            doc.commit_image_edit(base);
+                        if let (Some(doc), Some((base_img, ob, oc, os))) = (&mut self.doc, base) {
+                            let (nb, nc, ns) = (doc.brightness, doc.contrast, doc.saturation);
+                            doc.commit_adjustments(base_img, (ob, oc, os), (nb, nc, ns));
                             self.dirty = true;
                         }
-                        // 提交后滑块归位，下次从当前图重新调
-                        self.brightness = 0;
-                        self.contrast = 1.0;
-                        self.saturation = 1.0;
-                    }
-                    if ui.button("重置").clicked() {
-                        if let Some(base) = self.adjust_base.take() {
-                            if let Some(doc) = &mut self.doc {
-                                doc.image = base;
-                                self.dirty = true;
-                            }
-                        }
-                        self.brightness = 0;
-                        self.contrast = 1.0;
-                        self.saturation = 1.0;
-                        self.refresh_texture(&ctx);
                     }
                 });
                 ui.horizontal(|ui| {

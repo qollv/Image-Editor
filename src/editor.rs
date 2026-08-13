@@ -16,6 +16,9 @@ enum UndoEntry {
     Image {
         image: image::DynamicImage,
         annotations: Vec<Annotation>,
+        brightness: i32,
+        contrast: f32,
+        saturation: f32,
     },
 }
 
@@ -24,6 +27,10 @@ pub struct EditorDoc {
     pub annotations: Vec<Annotation>,
     pub style: Style,
     pub crop: Option<CropRect>,
+    /// 当前生效的调整值（撤销时一并恢复，使滑块跟着回退）
+    pub brightness: i32,
+    pub contrast: f32,
+    pub saturation: f32,
     undo_stack: Vec<UndoEntry>,
     redo_stack: Vec<UndoEntry>,
 }
@@ -38,6 +45,9 @@ impl EditorDoc {
                 width: 2.0,
             },
             crop: None,
+            brightness: 0,
+            contrast: 1.0,
+            saturation: 1.0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
@@ -62,13 +72,25 @@ impl EditorDoc {
                         .push(UndoEntry::Annotations(std::mem::take(&mut self.annotations)));
                     self.annotations = prev;
                 }
-                UndoEntry::Image { image, annotations } => {
+                UndoEntry::Image {
+                    image,
+                    annotations,
+                    brightness,
+                    contrast,
+                    saturation,
+                } => {
                     self.redo_stack.push(UndoEntry::Image {
                         image: self.image.clone(),
                         annotations: std::mem::take(&mut self.annotations),
+                        brightness: self.brightness,
+                        contrast: self.contrast,
+                        saturation: self.saturation,
                     });
                     self.image = image;
                     self.annotations = annotations;
+                    self.brightness = brightness;
+                    self.contrast = contrast;
+                    self.saturation = saturation;
                 }
             }
         }
@@ -83,13 +105,25 @@ impl EditorDoc {
                         .push(UndoEntry::Annotations(std::mem::take(&mut self.annotations)));
                     self.annotations = next;
                 }
-                UndoEntry::Image { image, annotations } => {
+                UndoEntry::Image {
+                    image,
+                    annotations,
+                    brightness,
+                    contrast,
+                    saturation,
+                } => {
                     self.undo_stack.push(UndoEntry::Image {
                         image: self.image.clone(),
                         annotations: std::mem::take(&mut self.annotations),
+                        brightness: self.brightness,
+                        contrast: self.contrast,
+                        saturation: self.saturation,
                     });
                     self.image = image;
                     self.annotations = annotations;
+                    self.brightness = brightness;
+                    self.contrast = contrast;
+                    self.saturation = saturation;
                 }
             }
         }
@@ -100,6 +134,9 @@ impl EditorDoc {
         self.undo_stack.push(UndoEntry::Image {
             image: self.image.clone(),
             annotations: self.annotations.clone(),
+            brightness: self.brightness,
+            contrast: self.contrast,
+            saturation: self.saturation,
         });
         self.redo_stack.clear();
     }
@@ -155,13 +192,24 @@ impl EditorDoc {
         img = saturate_image(&img, saturation);
         self.image = img;
     }
-    /// 提交图片级编辑：把拖动前的基准图作为撤销快照。
-    pub fn commit_image_edit(&mut self, base: image::DynamicImage) {
+    /// 提交调整：把拖动前状态作为撤销快照，并确认新调整值（使滑块跟着回退）。
+    pub fn commit_adjustments(
+        &mut self,
+        base: image::DynamicImage,
+        old: (i32, f32, f32),
+        new: (i32, f32, f32),
+    ) {
         self.undo_stack.push(UndoEntry::Image {
             image: base,
             annotations: self.annotations.clone(),
+            brightness: old.0,
+            contrast: old.1,
+            saturation: old.2,
         });
         self.redo_stack.clear();
+        self.brightness = new.0;
+        self.contrast = new.1;
+        self.saturation = new.2;
     }
     pub fn blur(&mut self, sigma: f32) {
         self.begin_image_edit();
@@ -378,5 +426,21 @@ mod tests {
         // 灰度后 r/g/b 相等（或近似）
         assert!((p[0] as i32 - p[1] as i32).abs() <= 2, "got {:?}", p);
         assert!((p[1] as i32 - p[2] as i32).abs() <= 2, "got {:?}", p);
+    }
+
+    #[test]
+    fn commit_adjustments_undo_restores_values() {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(4, 4));
+        let mut d = EditorDoc::new(img);
+        let base = d.image.clone();
+        // 亮度从 0 拖到 10
+        d.preview_adjustments(&base, 10, 1.0, 1.0);
+        d.commit_adjustments(base.clone(), (0, 1.0, 1.0), (10, 1.0, 1.0));
+        assert_eq!(d.brightness, 10);
+        // 撤销后亮度恢复 0，图像也恢复
+        d.undo();
+        assert_eq!(d.brightness, 0);
+        assert_eq!(d.contrast, 1.0);
+        assert_eq!(d.saturation, 1.0);
     }
 }
