@@ -136,37 +136,41 @@ pub fn rasterize(ann: &Annotation, style: &Style, img: &mut RgbaImage, font: Opt
             );
         }
         Annotation::Arrow { start, end } => {
+            let dx = end[0] - start[0];
+            let dy = end[1] - start[1];
+            let len = (dx * dx + dy * dy).sqrt().max(1.0);
+            let (ux, uy) = (dx / len, dy / len);
+            let (hx, hy) = (-uy, ux);
+            let head = 14.0_f32;
+            let half = head * 0.5;
+            // 基底中心
+            let (bx, by) = (end[0] - ux * head, end[1] - uy * head);
+            // 主线：start → 基底中心
             line(
                 img,
                 start[0] as i64,
                 start[1] as i64,
+                bx as i64,
+                by as i64,
+                c,
+                r,
+            );
+            // 头部三角：两个底角 → 尖端，形成标准箭头
+            line(
+                img,
+                (bx + hx * half) as i64,
+                (by + hy * half) as i64,
                 end[0] as i64,
                 end[1] as i64,
                 c,
                 r,
             );
-            let dx = end[0] - start[0];
-            let dy = end[1] - start[1];
-            let len = (dx * dx + dy * dy).sqrt().max(1.0);
-            let (ux, uy) = (dx / len, dy / len);
-            let head = 10.0_f32;
-            let (hx, hy) = (-uy, ux);
-            let (bx, by) = (end[0] - ux * head, end[1] - uy * head);
             line(
                 img,
-                bx as i64,
-                by as i64,
-                (bx + hx * head * 0.5) as i64,
-                (by + hy * head * 0.5) as i64,
-                c,
-                r,
-            );
-            line(
-                img,
-                bx as i64,
-                by as i64,
-                (bx - hx * head * 0.5) as i64,
-                (by - hy * head * 0.5) as i64,
+                (bx - hx * half) as i64,
+                (by - hy * half) as i64,
+                end[0] as i64,
+                end[1] as i64,
                 c,
                 r,
             );
@@ -318,5 +322,29 @@ mod tests {
         rasterize(&a, &s, &mut img, None);
         assert_eq!(img.get_pixel(0, 0), &image::Rgba([0, 255, 0, 255]));
         assert_eq!(img.get_pixel(2, 2), &image::Rgba([0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn arrow_has_triangle_head() {
+        // 水平箭头 start=(2,10) end=(30,10)，head=14, half=7
+        let a = Annotation::Arrow {
+            start: [2.0, 10.0],
+            end: [30.0, 10.0],
+        };
+        let s = Style {
+            color: [255, 0, 0, 255],
+            width: 1.0,
+        };
+        let mut img = image::RgbaImage::new(40, 40);
+        rasterize(&a, &s, &mut img, None);
+        // 尖端
+        assert_eq!(img.get_pixel(30, 10), &image::Rgba([255, 0, 0, 255]));
+        // 主线中段
+        assert_eq!(img.get_pixel(10, 10), &image::Rgba([255, 0, 0, 255]));
+        // 头部两个底角（base=(16,10)，垂直方向 ±7）
+        assert_eq!(img.get_pixel(16, 3), &image::Rgba([255, 0, 0, 255]));
+        assert_eq!(img.get_pixel(16, 17), &image::Rgba([255, 0, 0, 255]));
+        // 头部三角形内部应为空（空心箭头）
+        assert_eq!(img.get_pixel(20, 10), &image::Rgba([0, 0, 0, 0]));
     }
 }

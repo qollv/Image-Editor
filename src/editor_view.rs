@@ -232,13 +232,17 @@ impl EditorView {
             Annotation::Arrow { start, end } => {
                 let p0 = self.img_to_screen(egui::pos2(start[0], start[1]), origin);
                 let p1 = self.img_to_screen(egui::pos2(end[0], end[1]), origin);
-                painter.line_segment([p0, p1], stroke);
                 let dir = (p1 - p0).normalized();
-                let head = 12.0;
+                let head = 14.0;
                 let perp = egui::vec2(-dir.y, dir.x);
                 let base = p1 - dir * head;
-                painter.line_segment([base, base + dir * head * 0.0 + perp * head * 0.5], stroke);
-                painter.line_segment([base, base - perp * head * 0.5], stroke);
+                // 主线：start → 基底中心
+                painter.line_segment([p0, base], stroke);
+                // 头部三角：两个底角 → 尖端
+                let c1 = base + perp * head * 0.5;
+                let c2 = base - perp * head * 0.5;
+                painter.line_segment([c1, p1], stroke);
+                painter.line_segment([c2, p1], stroke);
             }
             Annotation::Rect { min, max } => {
                 let a = self.img_to_screen(egui::pos2(min[0], min[1]), origin);
@@ -275,16 +279,19 @@ impl EditorView {
         let a = self.img_to_screen(self.start_img, origin);
         let b = self.img_to_screen(self.cur_img, origin);
         match self.tool {
-            Tool::Line | Tool::Arrow => {
+            Tool::Line => {
                 painter.line_segment([a, b], stroke);
-                if self.tool == Tool::Arrow {
-                    let dir = (b - a).normalized();
-                    let perp = egui::vec2(-dir.y, dir.x);
-                    let head = 12.0;
-                    let base = b - dir * head;
-                    painter.line_segment([base, base + perp * head * 0.5], stroke);
-                    painter.line_segment([base, base - perp * head * 0.5], stroke);
-                }
+            }
+            Tool::Arrow => {
+                let dir = (b - a).normalized();
+                let perp = egui::vec2(-dir.y, dir.x);
+                let head = 14.0;
+                let base = b - dir * head;
+                painter.line_segment([a, base], stroke);
+                let c1 = base + perp * head * 0.5;
+                let c2 = base - perp * head * 0.5;
+                painter.line_segment([c1, b], stroke);
+                painter.line_segment([c2, b], stroke);
             }
             Tool::Rect | Tool::Ellipse => {
                 let rect = egui::Rect::from_two_pos(a, b);
