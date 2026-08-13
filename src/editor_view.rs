@@ -14,6 +14,8 @@ enum Tool {
     Rect,
     Ellipse,
     Text,
+    Mosaic,
+    Highlight,
     Crop,
     CropRatio,
 }
@@ -190,6 +192,8 @@ impl EditorView {
             Tool::Rect => "矩形",
             Tool::Ellipse => "椭圆",
             Tool::Text => "文字",
+            Tool::Mosaic => "马赛克",
+            Tool::Highlight => "荧光笔",
             Tool::Crop => "裁剪",
             Tool::CropRatio => "比例裁剪",
         }
@@ -256,6 +260,27 @@ impl EditorView {
                 let radius = egui::vec2((b.x - a.x).abs() / 2.0, (b.y - a.y).abs() / 2.0);
                 painter.add(egui::Shape::ellipse_stroke(center, radius, stroke));
             }
+            Annotation::Mosaic { min, max } => {
+                let a = self.img_to_screen(egui::pos2(min[0], min[1]), origin);
+                let b = self.img_to_screen(egui::pos2(max[0], max[1]), origin);
+                let rect = egui::Rect::from_two_pos(a, b);
+                // 半透明填充表示遮挡区域
+                painter.rect_filled(rect, 0.0, egui::Color32::from_rgba_unmultiplied(120, 120, 120, 90));
+                painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Middle);
+            }
+            Annotation::Highlight(pts) => {
+                let hc = egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 160);
+                let hstroke = egui::Stroke::new(style.width.max(4.0), hc);
+                if pts.len() == 1 {
+                    let p = self.img_to_screen(egui::pos2(pts[0][0], pts[0][1]), origin);
+                    painter.circle_stroke(p, style.width.max(4.0) / 2.0, hstroke);
+                }
+                for w in pts.windows(2) {
+                    let p0 = self.img_to_screen(egui::pos2(w[0][0], w[0][1]), origin);
+                    let p1 = self.img_to_screen(egui::pos2(w[1][0], w[1][1]), origin);
+                    painter.line_segment([p0, p1], hstroke);
+                }
+            }
             Annotation::Text { pos, content, size } => {
                 let p = self.img_to_screen(egui::pos2(pos[0], pos[1]), origin);
                 painter.text(
@@ -293,14 +318,14 @@ impl EditorView {
                 painter.line_segment([c1, b], stroke);
                 painter.line_segment([c2, b], stroke);
             }
-            Tool::Rect | Tool::Ellipse => {
+            Tool::Rect | Tool::Ellipse | Tool::Mosaic => {
                 let rect = egui::Rect::from_two_pos(a, b);
-                if self.tool == Tool::Rect {
-                    painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Middle);
-                } else {
+                if self.tool == Tool::Ellipse {
                     let center = rect.center();
                     let radius = egui::vec2(rect.width() / 2.0, rect.height() / 2.0);
                     painter.add(egui::Shape::ellipse_stroke(center, radius, stroke));
+                } else {
+                    painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Middle);
                 }
             }
             Tool::Crop | Tool::CropRatio => {
@@ -311,7 +336,7 @@ impl EditorView {
                     egui::StrokeKind::Middle,
                 );
             }
-            Tool::Brush => {
+            Tool::Brush | Tool::Highlight => {
                 // 实时画轨迹（按下即可见，无需等松开）
                 let pts: Vec<egui::Pos2> = self
                     .brush_pts
@@ -364,6 +389,17 @@ impl EditorView {
                 min: [sx.min(cx), sy.min(cy)],
                 max: [sx.max(cx), sy.max(cy)],
             },
+            Tool::Mosaic => Annotation::Mosaic {
+                min: [sx.min(cx), sy.min(cy)],
+                max: [sx.max(cx), sy.max(cy)],
+            },
+            Tool::Highlight => {
+                if self.brush_pts.is_empty() {
+                    return;
+                }
+                let pts = std::mem::take(&mut self.brush_pts);
+                Annotation::Highlight(pts)
+            }
             Tool::Crop | Tool::CropRatio => {
                 let (x0, y0) = (sx.min(cx), sy.min(cy));
                 let (x1, y1) = (sx.max(cx), sy.max(cy));
@@ -460,6 +496,8 @@ impl EditorView {
                 Tool::Rect,
                 Tool::Ellipse,
                 Tool::Text,
+                Tool::Mosaic,
+                Tool::Highlight,
                 Tool::Crop,
                 Tool::CropRatio,
             ] {
@@ -615,6 +653,8 @@ impl EditorView {
                 | Tool::Arrow
                 | Tool::Rect
                 | Tool::Ellipse
+                | Tool::Mosaic
+                | Tool::Highlight
                 | Tool::Crop
                 | Tool::CropRatio
         );
