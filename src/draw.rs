@@ -8,8 +8,8 @@ pub enum Annotation {
     Rect { min: [f32; 2], max: [f32; 2] },
     Ellipse { min: [f32; 2], max: [f32; 2] },
     Text { pos: [f32; 2], content: String, size: f32 },
-    /// 马赛克遮挡（对矩形区域像素化）
-    Mosaic { min: [f32; 2], max: [f32; 2] },
+    /// 马赛克遮挡（对矩形区域像素化，block 为块大小）
+    Mosaic { min: [f32; 2], max: [f32; 2], block: u32 },
     /// 荧光笔高亮（半透明粗笔画，alpha 混合）
     Highlight(Vec<[f32; 2]>),
 }
@@ -59,7 +59,7 @@ pub fn bbox(ann: &Annotation, style: &Style) -> Option<[f32; 4]> {
         }
         Annotation::Rect { min, max }
         | Annotation::Ellipse { min, max }
-        | Annotation::Mosaic { min, max } => {
+        | Annotation::Mosaic { min, max, .. } => {
             (
                 min[0].min(max[0]),
                 min[1].min(max[1]),
@@ -193,10 +193,11 @@ pub fn rasterize(ann: &Annotation, style: &Style, img: &mut RgbaImage, font: Opt
             }
         }
         Annotation::Highlight(pts) => {
-            // 荧光笔：半透明 alpha 混合
-            let hc = [c[0], c[1], c[2], 160];
+            // 荧光笔：半透明 alpha 混合，线宽更粗
+            let hc = [c[0], c[1], c[2], 180];
+            let hr = ((style.width.max(8.0) - 1.0) / 2.0).ceil().max(0.0) as i64;
             if pts.len() == 1 {
-                put_disc_blend(img, pts[0][0] as i64, pts[0][1] as i64, r, hc);
+                put_disc_blend(img, pts[0][0] as i64, pts[0][1] as i64, hr, hc);
             }
             for w in pts.windows(2) {
                 line_blend(
@@ -206,7 +207,7 @@ pub fn rasterize(ann: &Annotation, style: &Style, img: &mut RgbaImage, font: Opt
                     w[1][0] as i64,
                     w[1][1] as i64,
                     hc,
-                    r,
+                    hr,
                 );
             }
         }
@@ -276,14 +277,14 @@ pub fn rasterize(ann: &Annotation, style: &Style, img: &mut RgbaImage, font: Opt
             let ry = ((max[1] - min[1]).abs() / 2.0) as i64;
             midpoint_ellipse(img, cx, cy, rx, ry, c);
         }
-        Annotation::Mosaic { min, max } => {
+        Annotation::Mosaic { min, max, block } => {
             // 马赛克：把矩形区域按块取平均色（像素化遮挡）
             let x0 = min[0].max(0.0) as u32;
             let y0 = min[1].max(0.0) as u32;
             let x1 = max[0].min(img.width() as f32) as u32;
             let y1 = max[1].min(img.height() as f32) as u32;
             if x1 > x0 && y1 > y0 {
-                let bs: u32 = 12;
+                let bs = (*block).max(1);
                 let mut by = y0;
                 while by < y1 {
                     let mut bx = x0;
@@ -480,6 +481,7 @@ mod tests {
         let a = Annotation::Mosaic {
             min: [0.0, 0.0],
             max: [24.0, 12.0],
+            block: 12,
         };
         let s = Style {
             color: [0, 0, 0, 255],
@@ -504,18 +506,18 @@ mod tests {
 
     #[test]
     fn highlight_blends_semitransparent() {
-        let a = Annotation::Highlight(vec![[1.0, 1.0], [2.0, 1.0]]);
+        let a = Annotation::Highlight(vec![[1.0, 1.0]]);
         let s = Style {
             color: [255, 0, 0, 255],
             width: 1.0,
         };
-        let mut img = image::RgbaImage::new(5, 5);
+        let mut img = image::RgbaImage::new(8, 8);
         for p in img.pixels_mut() {
             *p = image::Rgba([255, 255, 255, 255]);
         }
         rasterize(&a, &s, &mut img, None);
-        // 荧光笔 alpha=160，红色混合到白底：g/b 约 255*(1-160/255) ≈ 95
+        // 荧光笔 alpha=180，单点只 blend 一次：g/b ≈ 255*(1-180/255) ≈ 75
         let p = img.get_pixel(1, 1);
-        assert!(p[0] == 255 && p[1] > 50 && p[1] < 150, "got {:?}", p);
+        assert!(p[0] == 255 && p[1] > 50 && p[1] < 100, "got {:?}", p);
     }
 }
