@@ -91,7 +91,8 @@ impl ConvertView {
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "out".into());
-                let dst = PathBuf::from(&out_dir).join(format!("{}.{}", stem, opts.format.extension()));
+                let dst = PathBuf::from(&out_dir)
+                    .join(format!("{}{}.{}", opts.name_prefix, stem, opts.format.extension()));
                 let result = if dst.exists() && opts.on_conflict == OnConflict::Skip {
                     Ok(())
                 } else {
@@ -184,6 +185,15 @@ impl ConvertView {
             ui.selectable_value(&mut self.opts.on_conflict, OnConflict::Overwrite, "覆盖");
             ui.label("透明背景色:");
             ui.color_edit_button_srgb(&mut self.opts.background);
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("缩放宽度(0=不缩放):");
+            ui.add(egui::DragValue::new(&mut self.opts.resize_width).range(0..=100_000));
+            ui.label("文件名前缀:");
+            ui.add(egui::TextEdit::singleline(&mut self.opts.name_prefix).desired_width(100.0));
+            ui.label("水印文字:");
+            ui.add(egui::TextEdit::singleline(&mut self.opts.watermark).desired_width(120.0));
         });
 
         let can_start = !self.files.is_empty() && !self.output_dir.is_empty() && self.running == 0;

@@ -52,6 +52,20 @@ pub fn convert_file(input: &Path, output: &Path, opts: &ConvertOptions) -> Resul
         img = flatten_alpha(img, opts.background);
     }
 
+    // 等比缩放（只在图片比目标宽度大时缩小）
+    if opts.resize_width > 0 && img.width() > opts.resize_width {
+        img = img.resize(
+            opts.resize_width,
+            u32::MAX,
+            image::imageops::FilterType::Lanczos3,
+        );
+    }
+
+    // 文字水印
+    if !opts.watermark.trim().is_empty() {
+        apply_watermark(&mut img, opts.watermark.trim());
+    }
+
     match opts.format {
         TargetFormat::Png => save_png(&img, output, opts),
         TargetFormat::Jpeg => save_jpeg(&img, output, opts),
@@ -61,6 +75,68 @@ pub fn convert_file(input: &Path, output: &Path, opts: &ConvertOptions) -> Resul
             Ok(())
         }
     }
+}
+
+fn load_watermark_font() -> fontdue::Font {
+    for p in [
+        "C:\\Windows\\Fonts\\msyh.ttc",
+        "C:\\Windows\\Fonts\\simhei.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+    ] {
+        if let Ok(bytes) = std::fs::read(p) {
+            let settings = fontdue::FontSettings {
+                collection_index: 0,
+                ..Default::default()
+            };
+            if let Ok(f) = fontdue::Font::from_bytes(bytes, settings) {
+                return f;
+            }
+        }
+    }
+    panic!("无法加载水印字体");
+}
+
+/// 在图片右下角叠加半透明白色文字水印。
+fn apply_watermark(img: &mut image::DynamicImage, text: &str) {
+    let font = load_watermark_font();
+    let mut rgba = img.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    let font_size = (w as f32 * 0.04).clamp(14.0, 120.0);
+
+    // 计算文字总宽度
+    let mut total_w = 0.0_f32;
+    for ch in text.chars() {
+        let (m, _) = font.rasterize(ch, font_size);
+        total_w += m.advance_width;
+    }
+
+    let start_x = (w as f32 - total_w - 12.0).max(0.0);
+    let start_y = (h as f32 - font_size - 12.0).max(0.0);
+    let mut cx = start_x;
+    for ch in text.chars() {
+        let (m, bmp) = font.rasterize(ch, font_size);
+        for row in 0..m.height {
+            for col in 0..m.width {
+                let cov = bmp[row * m.width + col];
+                if cov > 0 {
+                    let px = cx as i32 + m.xmin + col as i32;
+                    let py = start_y as i32 + m.ymin + row as i32;
+                    if px >= 0 && py >= 0 && (px as u32) < w && (py as u32) < h {
+                        let old = rgba.get_pixel(px as u32, py as u32);
+                        let a = 0.55_f32;
+                        let blend = |s: f32, d: u8| (s * a + d as f32 * (1.0 - a)) as u8;
+                        rgba.put_pixel(
+                            px as u32,
+                            py as u32,
+                            image::Rgba([blend(255.0, old[0]), blend(255.0, old[1]), blend(255.0, old[2]), 255]),
+                        );
+                    }
+                }
+            }
+        }
+        cx += m.advance_width;
+    }
+    *img = image::DynamicImage::ImageRgba8(rgba);
 }
 
 fn save_png(img: &image::DynamicImage, output: &Path, opts: &ConvertOptions) -> Result<(), ConvertError> {
@@ -169,5 +245,38 @@ mod tests {
             &ConvertOptions::default(),
         );
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn convert_resizes_width_keeping_ratio() {
+        let src = tmp_path("src4.png");
+        let dst = tmp_path("out4.png");
+        let img = RgbaImage::new(100, 50);
+        img.save(&src).unwrap();
+        let mut opts = ConvertOptions::default();
+        opts.format = TargetFormat::Png;
+        opts.resize_width = 50;
+        convert_file(&src, &dst, &opts).unwrap();
+        let out = image::open(&dst).unwrap();
+        assert_eq!(out.width(), 50);
+        assert_eq!(out.height(), 25);
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_file(&dst).ok();
+    }
+
+    #[test]
+    fn convert_no_resize_when_width_zero() {
+        let src = tmp_path("src5.png");
+        let dst = tmp_path("out5.png");
+        let img = RgbaImage::new(100, 50);
+        img.save(&src).unwrap();
+        let mut opts = ConvertOptions::default();
+        opts.format = TargetFormat::Png;
+        opts.resize_width = 0; // 不缩放
+        convert_file(&src, &dst, &opts).unwrap();
+        let out = image::open(&dst).unwrap();
+        assert_eq!(out.width(), 100);
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_file(&dst).ok();
     }
 }

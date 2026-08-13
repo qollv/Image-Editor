@@ -35,6 +35,12 @@ pub struct ConvertOptions {
     pub png_compression: PngCompression,
     pub background: [u8; 3],
     pub on_conflict: OnConflict,
+    /// 等比缩放到目标宽度（0 = 不缩放）
+    pub resize_width: u32,
+    /// 文字水印内容（空 = 无水印）
+    pub watermark: String,
+    /// 输出文件名前缀
+    pub name_prefix: String,
 }
 
 impl Default for ConvertOptions {
@@ -45,6 +51,9 @@ impl Default for ConvertOptions {
             png_compression: PngCompression::Default,
             background: [255, 255, 255],
             on_conflict: OnConflict::Skip,
+            resize_width: 0,
+            watermark: String::new(),
+            name_prefix: String::new(),
         }
     }
 }
