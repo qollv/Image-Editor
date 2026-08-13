@@ -28,6 +28,7 @@ pub struct EditorView {
     brightness: i32,
     contrast: f32,
     saturation: f32,
+    adjust_base: Option<image::DynamicImage>,
     mosaic_block: u32,
     zoom: f32,
     pan: egui::Vec2,
@@ -86,6 +87,7 @@ impl EditorView {
             brightness: 0,
             contrast: 1.0,
             saturation: 1.0,
+            adjust_base: None,
             mosaic_block: 16,
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
@@ -490,17 +492,56 @@ impl EditorView {
                 });
                 ui.horizontal(|ui| {
                     ui.label("亮度:");
-                    ui.add(egui::Slider::new(&mut self.brightness, -100..=100));
+                    let b_resp = ui.add(egui::Slider::new(&mut self.brightness, -100..=100));
                     ui.label("对比度:");
-                    ui.add(egui::Slider::new(&mut self.contrast, 0.0..=3.0));
+                    let c_resp = ui.add(egui::Slider::new(&mut self.contrast, 0.0..=3.0));
                     ui.label("饱和度:");
-                    ui.add(egui::Slider::new(&mut self.saturation, 0.0..=3.0));
-                    if ui.button("应用调整").clicked() {
-                        let (b, c, s) = (self.brightness, self.contrast, self.saturation);
-                        self.apply_image_op(&ctx, |d| d.apply_adjustments(b, c, s));
+                    let s_resp = ui.add(egui::Slider::new(&mut self.saturation, 0.0..=3.0));
+
+                    // 实时预览：拖动开始保存基准，拖动中实时预览，松手提交一次撤销
+                    let drag_started =
+                        b_resp.drag_started() || c_resp.drag_started() || s_resp.drag_started();
+                    let changed = b_resp.changed() || c_resp.changed() || s_resp.changed();
+                    let drag_stopped =
+                        b_resp.drag_stopped() || c_resp.drag_stopped() || s_resp.drag_stopped();
+
+                    if drag_started {
+                        if let Some(doc) = &self.doc {
+                            self.adjust_base = Some(doc.image.clone());
+                        }
+                    }
+                    if changed {
+                        {
+                            if let (Some(doc), Some(base)) = (&mut self.doc, &self.adjust_base) {
+                                let (b, c, s) = (self.brightness, self.contrast, self.saturation);
+                                doc.preview_adjustments(base, b, c, s);
+                                self.dirty = true;
+                            }
+                        }
+                        self.refresh_texture(&ctx);
+                    }
+                    if drag_stopped {
+                        let base = self.adjust_base.take();
+                        if let (Some(doc), Some(base)) = (&mut self.doc, base) {
+                            doc.commit_image_edit(base);
+                            self.dirty = true;
+                        }
+                        // 提交后滑块归位，下次从当前图重新调
                         self.brightness = 0;
                         self.contrast = 1.0;
                         self.saturation = 1.0;
+                    }
+                    if ui.button("重置").clicked() {
+                        if let Some(base) = self.adjust_base.take() {
+                            if let Some(doc) = &mut self.doc {
+                                doc.image = base;
+                                self.dirty = true;
+                            }
+                        }
+                        self.brightness = 0;
+                        self.contrast = 1.0;
+                        self.saturation = 1.0;
+                        self.refresh_texture(&ctx);
                     }
                 });
                 ui.horizontal(|ui| {

@@ -141,12 +141,27 @@ impl EditorDoc {
         self.begin_image_edit();
         self.image.invert();
     }
-    /// 一次性应用亮度/对比度/饱和度（单步撤销）。
-    pub fn apply_adjustments(&mut self, brightness: i32, contrast: f32, saturation: f32) {
-        self.begin_image_edit();
-        self.image = self.image.brighten(brightness);
-        self.image = self.image.adjust_contrast(contrast);
-        self.image = saturate_image(&self.image, saturation);
+    /// 实时预览调整：从基准图重新计算，不记录撤销。
+    pub fn preview_adjustments(
+        &mut self,
+        base: &image::DynamicImage,
+        brightness: i32,
+        contrast: f32,
+        saturation: f32,
+    ) {
+        let mut img = base.clone();
+        img = img.brighten(brightness);
+        img = img.adjust_contrast(contrast);
+        img = saturate_image(&img, saturation);
+        self.image = img;
+    }
+    /// 提交图片级编辑：把拖动前的基准图作为撤销快照。
+    pub fn commit_image_edit(&mut self, base: image::DynamicImage) {
+        self.undo_stack.push(UndoEntry::Image {
+            image: base,
+            annotations: self.annotations.clone(),
+        });
+        self.redo_stack.clear();
     }
     pub fn blur(&mut self, sigma: f32) {
         self.begin_image_edit();
