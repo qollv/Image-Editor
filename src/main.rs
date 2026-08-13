@@ -2,6 +2,7 @@ mod app;
 mod convert;
 mod convert_view;
 mod draw;
+mod editor;
 mod options;
 
 use eframe::egui;
