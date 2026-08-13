@@ -16,7 +16,6 @@ pub struct Style {
     pub width: f32,
 }
 
-#[allow(dead_code)] // 保留给"选中标注"功能，当前由测试覆盖
 pub fn bbox(ann: &Annotation, style: &Style) -> Option<[f32; 4]> {
     let pad = (style.width / 2.0).ceil();
     let (minx, miny, maxx, maxy) = match ann {
@@ -49,7 +48,11 @@ pub fn bbox(ann: &Annotation, style: &Style) -> Option<[f32; 4]> {
                 min[1].max(max[1]),
             )
         }
-        Annotation::Text { pos, size, .. } => (pos[0], pos[1], pos[0], pos[1] + size),
+        Annotation::Text { pos, content, size } => {
+            // 近似宽度：每个字符约 0.6 倍字号（中文等宽近似）
+            let w = content.chars().count() as f32 * *size * 0.6;
+            (pos[0], pos[1], pos[0] + w, pos[1] + size)
+        }
     };
     Some([
         minx - pad,

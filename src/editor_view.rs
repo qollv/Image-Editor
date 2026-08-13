@@ -34,6 +34,11 @@ pub struct EditorView {
     brush_pts: Vec<[f32; 2]>,
     text_input: String,
     text_pos: Option<[f32; 2]>,
+    text_screen_pos: Option<egui::Pos2>,
+    selected: Option<usize>,
+    drag_annot: bool,
+    drag_start_img: egui::Pos2,
+    drag_orig_pos: [f32; 2],
     save_dialog: bool,
     confirm_open: bool,
     status: String,
@@ -83,6 +88,11 @@ impl EditorView {
             brush_pts: Vec::new(),
             text_input: String::new(),
             text_pos: None,
+            text_screen_pos: None,
+            selected: None,
+            drag_annot: false,
+            drag_start_img: egui::Pos2::ZERO,
+            drag_orig_pos: [0.0, 0.0],
             save_dialog: false,
             confirm_open: false,
             status: "未打开图片".to_string(),
@@ -139,6 +149,36 @@ impl EditorView {
             (p.x - origin.x - self.pan.x) / self.zoom,
             (p.y - origin.y - self.pan.y) / self.zoom,
         )
+    }
+
+    /// 命中检测：返回给定图片坐标命中的文字标注索引（从后往前）。
+    fn hit_test(&self, p: egui::Pos2) -> Option<usize> {
+        let doc = self.doc.as_ref()?;
+        let style = doc.style;
+        for (i, a) in doc.annotations.iter().enumerate().rev() {
+            if let Some(b) = crate::draw::bbox(a, &style) {
+                if p.x >= b[0] && p.x <= b[0] + b[2] && p.y >= b[1] && p.y <= b[1] + b[3] {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    }
+
+    /// 生成图片内居中的、能容纳的最大比例裁剪框。
+    fn make_ratio_crop(ratio: (u32, u32), doc: &EditorDoc) -> CropRect {
+        let (rw, rh) = ratio;
+        let img_w = doc.image.width() as f32;
+        let img_h = doc.image.height() as f32;
+        let scale = (img_w / rw as f32).min(img_h / rh as f32);
+        let w = (scale * rw as f32).round() as u32;
+        let h = (scale * rh as f32).round() as u32;
+        CropRect {
+            x: (doc.image.width() - w) / 2,
+            y: (doc.image.height() - h) / 2,
+            w,
+            h,
+        }
     }
 
     fn tool_label(t: Tool) -> &'static str {
@@ -440,6 +480,10 @@ impl EditorView {
                 for (w, h) in ratios {
                     if ui.selectable_label(self.crop_ratio == (w, h), format!("{}:{}", w, h)).clicked() {
                         self.crop_ratio = (w, h);
+                        // 选比例后立即生成居中预览框，等用户点「应用裁剪」才真正裁剪
+                        if let Some(doc) = &mut self.doc {
+                            doc.crop = Some(Self::make_ratio_crop((w, h), doc));
+                        }
                     }
                 }
             }
@@ -460,12 +504,14 @@ impl EditorView {
                     self.dirty = true;
                 }
             }
-            if ui.add_enabled(has_doc, egui::Button::new("应用裁剪")).clicked() {
-                if let Some(d) = &mut self.doc {
-                    if d.crop.is_some() {
-                        d.apply_crop();
-                        self.dirty = true;
-                        self.refresh_texture(ui.ctx());
+            if self.tool == Tool::Crop || self.tool == Tool::CropRatio {
+                if ui.add_enabled(has_doc, egui::Button::new("应用裁剪")).clicked() {
+                    if let Some(d) = &mut self.doc {
+                        if d.crop.is_some() {
+                            d.apply_crop();
+                            self.dirty = true;
+                            self.refresh_texture(ui.ctx());
+                        }
                     }
                 }
             }
@@ -475,16 +521,34 @@ impl EditorView {
             }
         });
 
-        // 文字输入
-        if self.text_pos.is_some() {
-            ui.horizontal(|ui| {
-                ui.label("文字:");
-                ui.text_edit_singleline(&mut self.text_input);
-                let mut add = ui.button("添加").clicked();
-                if add && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    add = true;
-                }
-                if add && !self.text_input.is_empty() {
+        // 就地文字输入框（显示在点击位置）
+        if let Some(screen_pos) = self.text_screen_pos {
+            let mut done = false;
+            let mut cancel = false;
+            egui::Area::new(egui::Id::new("text_input_area"))
+                .fixed_pos(screen_pos)
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_min_width(220.0);
+                        ui.label("输入文字（回车确认）:");
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.text_input).hint_text("文字内容"),
+                        );
+                        resp.request_focus();
+                        let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        ui.horizontal(|ui| {
+                            if ui.button("确定").clicked() || enter {
+                                done = true;
+                            }
+                            if ui.button("取消").clicked() {
+                                cancel = true;
+                            }
+                        });
+                    });
+                });
+            if done {
+                if !self.text_input.is_empty() {
                     if let (Some(doc), Some(pos)) = (&mut self.doc, self.text_pos) {
                         doc.push_annotation(Annotation::Text {
                             pos,
@@ -492,13 +556,16 @@ impl EditorView {
                             size: 24.0,
                         });
                         self.dirty = true;
+                        self.selected = Some(doc.annotations.len() - 1);
                     }
-                    self.text_pos = None;
                 }
-                if ui.button("取消").clicked() {
-                    self.text_pos = None;
-                }
-            });
+                self.text_screen_pos = None;
+                self.text_pos = None;
+            }
+            if cancel {
+                self.text_screen_pos = None;
+                self.text_pos = None;
+            }
         }
 
         // 画布
@@ -507,10 +574,17 @@ impl EditorView {
             ui.allocate_painter(available.max(egui::vec2(200.0, 200.0)), egui::Sense::click_and_drag());
         let rect = response.rect;
 
-        // 缩放（围绕鼠标位置）
+        // 缩放（围绕鼠标位置）；选中文字标注时滚轮改为调整字号
         let zoom_delta = ui.input(|i| i.zoom_delta());
         if response.hovered() && (zoom_delta - 1.0).abs() > 1e-4 {
-            if let Some(hover) = response.hover_pos() {
+            if self.selected.is_some() {
+                if let (Some(doc), Some(i)) = (&mut self.doc, self.selected) {
+                    if let Some(Annotation::Text { size, .. }) = doc.annotations.get_mut(i) {
+                        *size = (*size * zoom_delta).clamp(6.0, 200.0);
+                        self.dirty = true;
+                    }
+                }
+            } else if let Some(hover) = response.hover_pos() {
                 let old_origin = rect.min + self.pan;
                 let before = self.screen_to_img(hover, old_origin);
                 self.zoom = (self.zoom * zoom_delta).clamp(0.05, 32.0);
@@ -586,11 +660,47 @@ impl EditorView {
         if self.drawing && released {
             self.commit_drawing();
         }
-        // 文字：单击放置
+        // Select：选中/拖动文字标注
+        if self.tool == Tool::Select {
+            if response.hovered() && pressed {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let p = self.screen_to_img(pos, origin);
+                    self.selected = self.hit_test(p);
+                    if self.selected.is_some() {
+                        self.drag_annot = true;
+                        self.drag_start_img = p;
+                        let orig = self.doc.as_ref().and_then(|doc| {
+                            self.selected.and_then(|i| match doc.annotations.get(i) {
+                                Some(Annotation::Text { pos, .. }) => Some(*pos),
+                                _ => None,
+                            })
+                        });
+                        self.drag_orig_pos = orig.unwrap_or([0.0, 0.0]);
+                    }
+                }
+            }
+            if self.drag_annot && down {
+                if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                    let p = self.screen_to_img(pos, origin);
+                    let dx = p.x - self.drag_start_img.x;
+                    let dy = p.y - self.drag_start_img.y;
+                    if let (Some(doc), Some(i)) = (&mut self.doc, self.selected) {
+                        if let Some(Annotation::Text { pos, .. }) = doc.annotations.get_mut(i) {
+                            *pos = [self.drag_orig_pos[0] + dx, self.drag_orig_pos[1] + dy];
+                        }
+                    }
+                }
+            }
+            if self.drag_annot && released {
+                self.drag_annot = false;
+            }
+        }
+        // 文字：单击放置（就地弹出输入框）
         if self.tool == Tool::Text && response.clicked() {
             if let Some(pos) = response.interact_pointer_pos() {
                 let p = self.screen_to_img(pos, origin);
                 self.text_pos = Some([p.x, p.y]);
+                self.text_screen_pos = Some(pos);
                 self.text_input.clear();
             }
         }
@@ -609,6 +719,21 @@ impl EditorView {
             let style = doc.style;
             for a in &doc.annotations {
                 self.draw_annotation(&painter, a, &style, origin);
+            }
+            // 选中文字标注的指示框
+            if let Some(i) = self.selected {
+                if let Some(a) = doc.annotations.get(i) {
+                    if let Some(b) = crate::draw::bbox(a, &style) {
+                        let min = self.img_to_screen(egui::pos2(b[0], b[1]), origin);
+                        let max = self.img_to_screen(egui::pos2(b[0] + b[2], b[1] + b[3]), origin);
+                        painter.rect_stroke(
+                            egui::Rect::from_two_pos(min, max),
+                            0.0,
+                            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0, 180, 255)),
+                            egui::StrokeKind::Middle,
+                        );
+                    }
+                }
             }
             // 裁剪框
             if let Some(c) = doc.crop {
