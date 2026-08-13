@@ -10,8 +10,6 @@ pub enum Annotation {
     Text { pos: [f32; 2], content: String, size: f32 },
     /// 马赛克遮挡（对矩形区域像素化，block 为块大小）
     Mosaic { min: [f32; 2], max: [f32; 2], block: u32 },
-    /// 荧光笔高亮（半透明粗笔画，alpha 混合）
-    Highlight(Vec<[f32; 2]>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -24,19 +22,6 @@ pub fn bbox(ann: &Annotation, style: &Style) -> Option<[f32; 4]> {
     let pad = (style.width / 2.0).ceil();
     let (minx, miny, maxx, maxy) = match ann {
         Annotation::Brush(pts) => {
-            if pts.is_empty() {
-                return None;
-            }
-            let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-            for p in pts {
-                x0 = x0.min(p[0]);
-                y0 = y0.min(p[1]);
-                x1 = x1.max(p[0]);
-                y1 = y1.max(p[1]);
-            }
-            (x0, y0, x1, y1)
-        }
-        Annotation::Highlight(pts) => {
             if pts.is_empty() {
                 return None;
             }
@@ -122,55 +107,6 @@ fn line(img: &mut RgbaImage, x0: i64, y0: i64, x1: i64, y1: i64, c: [u8; 4], r: 
     }
 }
 
-/// alpha 混合写入（用于荧光笔等半透明标注）。
-fn put_blend(img: &mut RgbaImage, x: i64, y: i64, c: [u8; 4]) {
-    if x >= 0 && y >= 0 && (x as u32) < img.width() && (y as u32) < img.height() {
-        let (x, y) = (x as u32, y as u32);
-        let a = c[3] as f32 / 255.0;
-        let old = img.get_pixel(x, y);
-        let blend = |s: u8, d: u8| (s as f32 * a + d as f32 * (1.0 - a)) as u8;
-        img.put_pixel(
-            x,
-            y,
-            image::Rgba([blend(c[0], old[0]), blend(c[1], old[1]), blend(c[2], old[2]), 255]),
-        );
-    }
-}
-
-fn put_disc_blend(img: &mut RgbaImage, x: i64, y: i64, r: i64, c: [u8; 4]) {
-    for dy in -r..=r {
-        for dx in -r..=r {
-            if dx * dx + dy * dy <= r * r {
-                put_blend(img, x + dx, y + dy, c);
-            }
-        }
-    }
-}
-
-fn line_blend(img: &mut RgbaImage, x0: i64, y0: i64, x1: i64, y1: i64, c: [u8; 4], r: i64) {
-    let (mut x, mut y) = (x0, y0);
-    let dx = (x1 - x0).abs();
-    let dy = -(y1 - y0).abs();
-    let sx = if x0 < x1 { 1 } else { -1 };
-    let sy = if y0 < y1 { 1 } else { -1 };
-    let mut err = dx + dy;
-    loop {
-        put_disc_blend(img, x, y, r, c);
-        if x == x1 && y == y1 {
-            break;
-        }
-        let e2 = 2 * err;
-        if e2 >= dy {
-            err += dy;
-            x += sx;
-        }
-        if e2 <= dx {
-            err += dx;
-            y += sy;
-        }
-    }
-}
-
 pub fn rasterize(ann: &Annotation, style: &Style, img: &mut RgbaImage, font: Option<&fontdue::Font>) {
     let c = style.color;
     // 线宽 → 圆盘半径：width=1 → r=0（单像素），width=3 → r=1，以此类推
@@ -189,25 +125,6 @@ pub fn rasterize(ann: &Annotation, style: &Style, img: &mut RgbaImage, font: Opt
                     w[1][1] as i64,
                     c,
                     r,
-                );
-            }
-        }
-        Annotation::Highlight(pts) => {
-            // 荧光笔：半透明 alpha 混合，线宽更粗
-            let hc = [c[0], c[1], c[2], 180];
-            let hr = ((style.width.max(8.0) - 1.0) / 2.0).ceil().max(0.0) as i64;
-            if pts.len() == 1 {
-                put_disc_blend(img, pts[0][0] as i64, pts[0][1] as i64, hr, hc);
-            }
-            for w in pts.windows(2) {
-                line_blend(
-                    img,
-                    w[0][0] as i64,
-                    w[0][1] as i64,
-                    w[1][0] as i64,
-                    w[1][1] as i64,
-                    hc,
-                    hr,
                 );
             }
         }
@@ -502,22 +419,5 @@ mod tests {
         assert_eq!(img.get_pixel(3, 3), &image::Rgba([127, 0, 127, 255]));
         // 块 (12..24)：全蓝 → 平均 (0,0,255)
         assert_eq!(img.get_pixel(15, 3), &image::Rgba([0, 0, 255, 255]));
-    }
-
-    #[test]
-    fn highlight_blends_semitransparent() {
-        let a = Annotation::Highlight(vec![[1.0, 1.0]]);
-        let s = Style {
-            color: [255, 0, 0, 255],
-            width: 1.0,
-        };
-        let mut img = image::RgbaImage::new(8, 8);
-        for p in img.pixels_mut() {
-            *p = image::Rgba([255, 255, 255, 255]);
-        }
-        rasterize(&a, &s, &mut img, None);
-        // 荧光笔 alpha=180，单点只 blend 一次：g/b ≈ 255*(1-180/255) ≈ 75
-        let p = img.get_pixel(1, 1);
-        assert!(p[0] == 255 && p[1] > 50 && p[1] < 100, "got {:?}", p);
     }
 }

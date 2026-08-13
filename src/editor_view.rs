@@ -15,7 +15,6 @@ enum Tool {
     Ellipse,
     Text,
     Mosaic,
-    Highlight,
     Crop,
     CropRatio,
 }
@@ -146,7 +145,17 @@ impl EditorView {
 
     fn refresh_texture(&mut self, ctx: &egui::Context) {
         if let Some(doc) = &self.doc {
-            self.texture = Some(self.make_texture(ctx, &doc.image));
+            // 先对马赛克标注做像素化，再生成纹理（让预览实时显示马赛克效果）
+            let mut rgba = doc.image.to_rgba8();
+            let style = doc.style;
+            for a in &doc.annotations {
+                if let Annotation::Mosaic { .. } = a {
+                    crate::draw::rasterize(a, &style, &mut rgba, None);
+                }
+            }
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            let color = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+            self.texture = Some(ctx.load_texture("editor_img", color, egui::TextureOptions::LINEAR));
         }
     }
 
@@ -201,7 +210,6 @@ impl EditorView {
             Tool::Ellipse => "椭圆",
             Tool::Text => "文字",
             Tool::Mosaic => "马赛克",
-            Tool::Highlight => "荧光笔",
             Tool::Crop => "裁剪",
             Tool::CropRatio => "比例裁剪",
         }
@@ -269,25 +277,10 @@ impl EditorView {
                 painter.add(egui::Shape::ellipse_stroke(center, radius, stroke));
             }
             Annotation::Mosaic { min, max, .. } => {
+                // 实际像素化由 rebuild_texture 处理，这里只画边框提示区域
                 let a = self.img_to_screen(egui::pos2(min[0], min[1]), origin);
                 let b = self.img_to_screen(egui::pos2(max[0], max[1]), origin);
-                let rect = egui::Rect::from_two_pos(a, b);
-                // 半透明填充表示遮挡区域
-                painter.rect_filled(rect, 0.0, egui::Color32::from_rgba_unmultiplied(120, 120, 120, 90));
-                painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Middle);
-            }
-            Annotation::Highlight(pts) => {
-                let hc = egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 180);
-                let hstroke = egui::Stroke::new(style.width.max(8.0), hc);
-                if pts.len() == 1 {
-                    let p = self.img_to_screen(egui::pos2(pts[0][0], pts[0][1]), origin);
-                    painter.circle_stroke(p, style.width.max(8.0) / 2.0, hstroke);
-                }
-                for w in pts.windows(2) {
-                    let p0 = self.img_to_screen(egui::pos2(w[0][0], w[0][1]), origin);
-                    let p1 = self.img_to_screen(egui::pos2(w[1][0], w[1][1]), origin);
-                    painter.line_segment([p0, p1], hstroke);
-                }
+                painter.rect_stroke(egui::Rect::from_two_pos(a, b), 0.0, stroke, egui::StrokeKind::Middle);
             }
             Annotation::Text { pos, content, size } => {
                 let p = self.img_to_screen(egui::pos2(pos[0], pos[1]), origin);
@@ -358,21 +351,6 @@ impl EditorView {
                     painter.line_segment([w[0], w[1]], stroke);
                 }
             }
-            Tool::Highlight => {
-                let hc = egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 180);
-                let hstroke = egui::Stroke::new(style.width.max(8.0), hc);
-                let pts: Vec<egui::Pos2> = self
-                    .brush_pts
-                    .iter()
-                    .map(|p| self.img_to_screen(egui::pos2(p[0], p[1]), origin))
-                    .collect();
-                if pts.len() == 1 {
-                    painter.circle_stroke(pts[0], style.width.max(8.0) / 2.0, hstroke);
-                }
-                for w in pts.windows(2) {
-                    painter.line_segment([w[0], w[1]], hstroke);
-                }
-            }
             _ => {}
         }
     }
@@ -417,13 +395,6 @@ impl EditorView {
                 max: [sx.max(cx), sy.max(cy)],
                 block: self.mosaic_block,
             },
-            Tool::Highlight => {
-                if self.brush_pts.is_empty() {
-                    return;
-                }
-                let pts = std::mem::take(&mut self.brush_pts);
-                Annotation::Highlight(pts)
-            }
             Tool::Crop | Tool::CropRatio => {
                 let (x0, y0) = (sx.min(cx), sy.min(cy));
                 let (x1, y1) = (sx.max(cx), sy.max(cy));
@@ -596,7 +567,6 @@ impl EditorView {
                 Tool::Ellipse,
                 Tool::Text,
                 Tool::Mosaic,
-                Tool::Highlight,
                 Tool::Crop,
                 Tool::CropRatio,
             ] {
@@ -635,7 +605,21 @@ impl EditorView {
             let has_doc = self.doc.is_some();
             if self.tool == Tool::Mosaic {
                 ui.label("马赛克强度:");
-                ui.add(egui::Slider::new(&mut self.mosaic_block, 4..=64));
+                let resp = ui.add(egui::Slider::new(&mut self.mosaic_block, 4..=64));
+                if resp.changed() {
+                    let block = self.mosaic_block;
+                    {
+                        let doc = self.doc.as_mut().unwrap();
+                        for a in &mut doc.annotations {
+                            if let Annotation::Mosaic { block: b, .. } = a {
+                                *b = block;
+                            }
+                        }
+                        self.dirty = true;
+                    }
+                    // 实时刷新马赛克效果
+                    self.refresh_texture(ui.ctx());
+                }
             }
             if ui.add_enabled(has_doc, egui::Button::new("撤销")).clicked() {
                 {
@@ -760,7 +744,6 @@ impl EditorView {
                 | Tool::Rect
                 | Tool::Ellipse
                 | Tool::Mosaic
-                | Tool::Highlight
                 | Tool::Crop
                 | Tool::CropRatio
         );
@@ -812,6 +795,8 @@ impl EditorView {
         }
         if self.drawing && released {
             self.commit_drawing();
+            // 马赛克标注新增后刷新纹理，让预览立即显示像素化
+            self.refresh_texture(ui.ctx());
         }
         // Select：选中/拖动文字标注
         if self.tool == Tool::Select {
