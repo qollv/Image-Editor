@@ -10,11 +10,19 @@ pub struct CropRect {
     pub h: u32,
 }
 
-/// 撤销栈条目：标注操作用轻量快照，图片级操作（裁剪/调整/滤镜）用完整原图快照。
+/// 撤销栈条目。
 enum UndoEntry {
+    /// 标注操作（轻量快照）
     Annotations(Vec<Annotation>),
+    /// 调整值变更（轻量快照，只存三个数值）
+    Adjust {
+        brightness: i32,
+        contrast: f32,
+        saturation: f32,
+    },
+    /// 图片级操作（旋转/裁剪/滤镜）：保存底层图 + 完整状态
     Image {
-        image: image::DynamicImage,
+        base_image: image::DynamicImage,
         annotations: Vec<Annotation>,
         brightness: i32,
         contrast: f32,
@@ -23,6 +31,9 @@ enum UndoEntry {
 }
 
 pub struct EditorDoc {
+    /// 底层原图：旋转/裁剪/滤镜作用于此，调整值不改变它
+    base_image: image::DynamicImage,
+    /// 显示图 = base_image + 亮度/对比度/饱和度（实时计算）
     pub image: image::DynamicImage,
     pub annotations: Vec<Annotation>,
     pub style: Style,
@@ -38,6 +49,7 @@ pub struct EditorDoc {
 impl EditorDoc {
     pub fn new(image: image::DynamicImage) -> Self {
         Self {
+            base_image: image.clone(),
             image,
             annotations: Vec::new(),
             style: Style {
@@ -51,6 +63,15 @@ impl EditorDoc {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
+    }
+
+    /// 从底层图 + 调整值重新计算显示图。
+    pub fn recompute(&mut self) {
+        let mut img = self.base_image.clone();
+        img = img.brighten(self.brightness);
+        img = img.adjust_contrast(self.contrast);
+        img = saturate_image(&img, self.saturation);
+        self.image = img;
     }
 
     pub fn open(path: &Path) -> Result<Self, image::ImageError> {
@@ -72,25 +93,41 @@ impl EditorDoc {
                         .push(UndoEntry::Annotations(std::mem::take(&mut self.annotations)));
                     self.annotations = prev;
                 }
+                UndoEntry::Adjust {
+                    brightness,
+                    contrast,
+                    saturation,
+                } => {
+                    self.redo_stack.push(UndoEntry::Adjust {
+                        brightness: self.brightness,
+                        contrast: self.contrast,
+                        saturation: self.saturation,
+                    });
+                    self.brightness = brightness;
+                    self.contrast = contrast;
+                    self.saturation = saturation;
+                    self.recompute();
+                }
                 UndoEntry::Image {
-                    image,
+                    base_image,
                     annotations,
                     brightness,
                     contrast,
                     saturation,
                 } => {
                     self.redo_stack.push(UndoEntry::Image {
-                        image: self.image.clone(),
+                        base_image: self.base_image.clone(),
                         annotations: std::mem::take(&mut self.annotations),
                         brightness: self.brightness,
                         contrast: self.contrast,
                         saturation: self.saturation,
                     });
-                    self.image = image;
+                    self.base_image = base_image;
                     self.annotations = annotations;
                     self.brightness = brightness;
                     self.contrast = contrast;
                     self.saturation = saturation;
+                    self.recompute();
                 }
             }
         }
@@ -105,34 +142,50 @@ impl EditorDoc {
                         .push(UndoEntry::Annotations(std::mem::take(&mut self.annotations)));
                     self.annotations = next;
                 }
+                UndoEntry::Adjust {
+                    brightness,
+                    contrast,
+                    saturation,
+                } => {
+                    self.undo_stack.push(UndoEntry::Adjust {
+                        brightness: self.brightness,
+                        contrast: self.contrast,
+                        saturation: self.saturation,
+                    });
+                    self.brightness = brightness;
+                    self.contrast = contrast;
+                    self.saturation = saturation;
+                    self.recompute();
+                }
                 UndoEntry::Image {
-                    image,
+                    base_image,
                     annotations,
                     brightness,
                     contrast,
                     saturation,
                 } => {
                     self.undo_stack.push(UndoEntry::Image {
-                        image: self.image.clone(),
+                        base_image: self.base_image.clone(),
                         annotations: std::mem::take(&mut self.annotations),
                         brightness: self.brightness,
                         contrast: self.contrast,
                         saturation: self.saturation,
                     });
-                    self.image = image;
+                    self.base_image = base_image;
                     self.annotations = annotations;
                     self.brightness = brightness;
                     self.contrast = contrast;
                     self.saturation = saturation;
+                    self.recompute();
                 }
             }
         }
     }
 
-    /// 图片级编辑：保存当前快照（供后续调整/滤镜/裁剪撤销）。
+    /// 图片级编辑：保存底层图快照（供后续旋转/裁剪/滤镜撤销）。
     fn begin_image_edit(&mut self) {
         self.undo_stack.push(UndoEntry::Image {
-            image: self.image.clone(),
+            base_image: self.base_image.clone(),
             annotations: self.annotations.clone(),
             brightness: self.brightness,
             contrast: self.contrast,
@@ -144,84 +197,70 @@ impl EditorDoc {
     pub fn apply_crop(&mut self) {
         if let Some(c) = self.crop.take() {
             self.begin_image_edit();
-            let cropped = self.image.crop_imm(c.x, c.y, c.w, c.h);
-            self.image = cropped;
+            self.base_image = self.base_image.crop_imm(c.x, c.y, c.w, c.h);
             self.annotations.clear();
+            self.recompute();
         }
     }
 
     pub fn rotate90(&mut self) {
         self.begin_image_edit();
-        self.image = self.image.rotate90();
+        self.base_image = self.base_image.rotate90();
+        self.recompute();
     }
     pub fn rotate180(&mut self) {
         self.begin_image_edit();
-        self.image = self.image.rotate180();
+        self.base_image = self.base_image.rotate180();
+        self.recompute();
     }
     pub fn rotate270(&mut self) {
         self.begin_image_edit();
-        self.image = self.image.rotate270();
+        self.base_image = self.base_image.rotate270();
+        self.recompute();
     }
     pub fn flip_horizontal(&mut self) {
         self.begin_image_edit();
-        self.image = self.image.fliph();
+        self.base_image = self.base_image.fliph();
+        self.recompute();
     }
     pub fn flip_vertical(&mut self) {
         self.begin_image_edit();
-        self.image = self.image.flipv();
+        self.base_image = self.base_image.flipv();
+        self.recompute();
     }
     pub fn grayscale(&mut self) {
         self.begin_image_edit();
-        self.image = self.image.grayscale();
+        self.base_image = self.base_image.grayscale();
+        self.recompute();
     }
     pub fn invert(&mut self) {
         self.begin_image_edit();
-        self.image.invert();
+        self.base_image.invert();
+        self.recompute();
     }
-    /// 实时预览调整：从基准图重新计算，不记录撤销。
-    pub fn preview_adjustments(
-        &mut self,
-        base: &image::DynamicImage,
-        brightness: i32,
-        contrast: f32,
-        saturation: f32,
-    ) {
-        let mut img = base.clone();
-        img = img.brighten(brightness);
-        img = img.adjust_contrast(contrast);
-        img = saturate_image(&img, saturation);
-        self.image = img;
-    }
-    /// 提交调整：把拖动前状态作为撤销快照，并确认新调整值（使滑块跟着回退）。
-    pub fn commit_adjustments(
-        &mut self,
-        base: image::DynamicImage,
-        old: (i32, f32, f32),
-        new: (i32, f32, f32),
-    ) {
-        self.undo_stack.push(UndoEntry::Image {
-            image: base,
-            annotations: self.annotations.clone(),
+    /// 提交调整：把拖动前的调整值作为撤销快照（新值已由滑块写入并实时预览）。
+    pub fn commit_adjust(&mut self, old: (i32, f32, f32)) {
+        self.undo_stack.push(UndoEntry::Adjust {
             brightness: old.0,
             contrast: old.1,
             saturation: old.2,
         });
         self.redo_stack.clear();
-        self.brightness = new.0;
-        self.contrast = new.1;
-        self.saturation = new.2;
     }
     pub fn blur(&mut self, sigma: f32) {
         self.begin_image_edit();
-        self.image = self.image.blur(sigma);
+        self.base_image = self.base_image.blur(sigma);
+        self.recompute();
     }
     pub fn unsharpen(&mut self, sigma: f32, threshold: i32) {
         self.begin_image_edit();
-        self.image = self.image.unsharpen(sigma, threshold);
+        self.base_image = self.base_image.unsharpen(sigma, threshold);
+        self.recompute();
     }
     pub fn pixelate(&mut self, block_size: u32) {
         self.begin_image_edit();
-        self.image = pixelate_image(&self.image, block_size);
+        self.base_image = pixelate_image(&self.base_image, block_size);
+        self.recompute();
     }
 
     pub fn render(&self, font: Option<&fontdue::Font>) -> image::RgbaImage {
@@ -429,18 +468,37 @@ mod tests {
     }
 
     #[test]
-    fn commit_adjustments_undo_restores_values() {
+    fn commit_adjust_undo_restores_values() {
         let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(4, 4));
         let mut d = EditorDoc::new(img);
-        let base = d.image.clone();
         // 亮度从 0 拖到 10
-        d.preview_adjustments(&base, 10, 1.0, 1.0);
-        d.commit_adjustments(base.clone(), (0, 1.0, 1.0), (10, 1.0, 1.0));
+        d.brightness = 10;
+        d.recompute();
+        d.commit_adjust((0, 1.0, 1.0));
         assert_eq!(d.brightness, 10);
-        // 撤销后亮度恢复 0，图像也恢复
+        // 撤销后亮度恢复 0
         d.undo();
         assert_eq!(d.brightness, 0);
         assert_eq!(d.contrast, 1.0);
         assert_eq!(d.saturation, 1.0);
+    }
+
+    #[test]
+    fn zero_adjustments_equals_base_image() {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(4, 4));
+        let base = img.clone();
+        let mut d = EditorDoc::new(img);
+        // 调亮度 10、对比度 2、饱和度 1.5
+        d.brightness = 10;
+        d.contrast = 2.0;
+        d.saturation = 1.5;
+        d.recompute();
+        // 再全部归位
+        d.brightness = 0;
+        d.contrast = 1.0;
+        d.saturation = 1.0;
+        d.recompute();
+        // 归位后应精确等于原图
+        assert_eq!(d.image.to_rgb8().as_raw(), base.to_rgb8().as_raw());
     }
 }

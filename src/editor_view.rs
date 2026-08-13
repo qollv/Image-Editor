@@ -25,8 +25,8 @@ pub struct EditorView {
     dirty: bool,
     tool: Tool,
     crop_ratio: (u32, u32),
-    /// 调整拖动基准：(拖动前 image, 旧亮度, 旧对比度, 旧饱和度)
-    adjust_base: Option<(image::DynamicImage, i32, f32, f32)>,
+    /// 调整拖动前的旧值 (亮度, 对比度, 饱和度)
+    adjust_base: Option<(i32, f32, f32)>,
     mosaic_block: u32,
     zoom: f32,
     pan: egui::Vec2,
@@ -505,10 +505,9 @@ impl EditorView {
                         b_resp.drag_stopped() || c_resp.drag_stopped() || s_resp.drag_stopped();
 
                     if drag_started {
-                        // 记录拖动前的完整状态
+                        // 记录拖动前的旧调整值
                         if let Some(doc) = &self.doc {
                             self.adjust_base = Some((
-                                doc.image.clone(),
                                 doc.brightness,
                                 doc.contrast,
                                 doc.saturation,
@@ -517,21 +516,18 @@ impl EditorView {
                     }
                     if changed {
                         {
-                            if let (Some(doc), Some((base, _, _, _))) =
-                                (&mut self.doc, &self.adjust_base)
-                            {
-                                let (b, c, s) = (doc.brightness, doc.contrast, doc.saturation);
-                                doc.preview_adjustments(base, b, c, s);
+                            if let Some(doc) = &mut self.doc {
+                                // 滑块已写入新值，从底层图重新计算显示图
+                                doc.recompute();
                                 self.dirty = true;
                             }
                         }
                         self.refresh_texture(&ctx);
                     }
                     if drag_stopped {
-                        let base = self.adjust_base.take();
-                        if let (Some(doc), Some((base_img, ob, oc, os))) = (&mut self.doc, base) {
-                            let (nb, nc, ns) = (doc.brightness, doc.contrast, doc.saturation);
-                            doc.commit_adjustments(base_img, (ob, oc, os), (nb, nc, ns));
+                        let old = self.adjust_base.take();
+                        if let (Some(doc), Some(old)) = (&mut self.doc, old) {
+                            doc.commit_adjust(old);
                             self.dirty = true;
                         }
                     }
