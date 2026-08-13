@@ -7,7 +7,6 @@ use crate::options::{ConvertOptions, PngCompression, TargetFormat};
 pub enum ConvertError {
     Io(std::io::Error),
     Image(image::ImageError),
-    Unsupported(String),
 }
 
 impl fmt::Display for ConvertError {
@@ -15,7 +14,6 @@ impl fmt::Display for ConvertError {
         match self {
             ConvertError::Io(e) => write!(f, "IO 错误: {}", e),
             ConvertError::Image(e) => write!(f, "图像错误: {}", e),
-            ConvertError::Unsupported(s) => write!(f, "不支持: {}", s),
         }
     }
 }

@@ -1,0 +1,219 @@
+use std::path::PathBuf;
+use std::sync::mpsc;
+
+use eframe::egui;
+use rayon::prelude::*;
+
+use crate::convert::convert_file;
+use crate::options::{ConvertOptions, OnConflict, PngCompression, TargetFormat};
+
+enum RowStatus {
+    Pending,
+    Done(Result<(), String>),
+}
+
+struct FileRow {
+    path: PathBuf,
+    status: RowStatus,
+}
+
+enum Msg {
+    Progress { index: usize, result: Result<(), String> },
+    AllDone,
+}
+
+pub struct ConvertView {
+    files: Vec<FileRow>,
+    opts: ConvertOptions,
+    output_dir: String,
+    rx: Option<mpsc::Receiver<Msg>>,
+    running: usize,
+    done: usize,
+}
+
+impl ConvertView {
+    pub fn new() -> Self {
+        Self {
+            files: Vec::new(),
+            opts: ConvertOptions::default(),
+            output_dir: String::new(),
+            rx: None,
+            running: 0,
+            done: 0,
+        }
+    }
+
+    fn add_files(&mut self, paths: Vec<PathBuf>) {
+        for p in paths {
+            if p.is_file() {
+                self.files.push(FileRow {
+                    path: p,
+                    status: RowStatus::Pending,
+                });
+            }
+        }
+    }
+
+    fn add_folder(&mut self) {
+        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                let mut paths = Vec::new();
+                for e in entries.flatten() {
+                    let p = e.path();
+                    if p.is_file() {
+                        paths.push(p);
+                    }
+                }
+                self.add_files(paths);
+            }
+        }
+    }
+
+    fn start(&mut self) {
+        if self.output_dir.is_empty() || self.files.is_empty() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.rx = Some(rx);
+        self.running = self.files.len();
+        self.done = 0;
+        for r in &mut self.files {
+            r.status = RowStatus::Pending;
+        }
+
+        let files = self.files.iter().map(|r| r.path.clone()).collect::<Vec<_>>();
+        let opts = self.opts.clone();
+        let out_dir = self.output_dir.clone();
+
+        std::thread::spawn(move || {
+            files.par_iter().enumerate().for_each(|(i, src)| {
+                let stem = src
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "out".into());
+                let dst = PathBuf::from(&out_dir).join(format!("{}.{}", stem, opts.format.extension()));
+                let result = if dst.exists() && opts.on_conflict == OnConflict::Skip {
+                    Ok(())
+                } else {
+                    convert_file(src, &dst, &opts).map_err(|e| e.to_string())
+                };
+                let _ = tx.send(Msg::Progress { index: i, result });
+            });
+            let _ = tx.send(Msg::AllDone);
+        });
+    }
+
+    pub fn ui(&mut self, ui: &mut egui::Ui) {
+        if let Some(rx) = &self.rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(Msg::Progress { index, result }) => {
+                        if let Some(row) = self.files.get_mut(index) {
+                            row.status = RowStatus::Done(result);
+                        }
+                        self.done += 1;
+                    }
+                    Ok(Msg::AllDone) => {
+                        self.rx = None;
+                        self.running = 0;
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+
+        ui.horizontal(|ui| {
+            if ui.button("添加文件").clicked() {
+                if let Some(paths) = rfd::FileDialog::new().pick_files() {
+                    self.add_files(paths);
+                }
+            }
+            if ui.button("添加文件夹").clicked() {
+                self.add_folder();
+            }
+            if ui.button("清空列表").clicked() {
+                self.files.clear();
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("目标格式:");
+            egui::ComboBox::from_id_salt("fmt")
+                .selected_text(self.opts.format.label())
+                .show_ui(ui, |ui| {
+                    for f in TargetFormat::all() {
+                        ui.selectable_value(&mut self.opts.format, *f, f.label());
+                    }
+                });
+            ui.label("输出目录:");
+            ui.text_edit_singleline(&mut self.output_dir);
+            if ui.button("浏览…").clicked() {
+                if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                    self.output_dir = d.display().to_string();
+                }
+            }
+        });
+
+        match self.opts.format {
+            TargetFormat::Jpeg => {
+                ui.horizontal(|ui| {
+                    ui.label("质量:");
+                    ui.add(egui::Slider::new(&mut self.opts.jpeg_quality, 1..=100));
+                });
+            }
+            TargetFormat::Png => {
+                ui.horizontal(|ui| {
+                    ui.label("压缩:");
+                    ui.selectable_value(&mut self.opts.png_compression, PngCompression::Fast, "快速");
+                    ui.selectable_value(&mut self.opts.png_compression, PngCompression::Default, "默认");
+                    ui.selectable_value(&mut self.opts.png_compression, PngCompression::Best, "最佳");
+                });
+            }
+            TargetFormat::Webp => {
+                ui.horizontal(|ui| {
+                    ui.label("WebP 为无损编码（image 库限制）");
+                });
+            }
+            _ => {}
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("同名文件:");
+            ui.selectable_value(&mut self.opts.on_conflict, OnConflict::Skip, "跳过");
+            ui.selectable_value(&mut self.opts.on_conflict, OnConflict::Overwrite, "覆盖");
+            ui.label("透明背景色:");
+            ui.color_edit_button_srgb(&mut self.opts.background);
+        });
+
+        let can_start = !self.files.is_empty() && !self.output_dir.is_empty() && self.running == 0;
+        if ui
+            .add_enabled(can_start, egui::Button::new("开始转换"))
+            .clicked()
+        {
+            self.start();
+        }
+        if self.running > 0 {
+            ui.add(
+                egui::ProgressBar::new(self.done as f32 / self.running as f32)
+                    .text(format!("{}/{}", self.done, self.running)),
+            );
+        }
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for r in &self.files {
+                match &r.status {
+                    RowStatus::Pending => {
+                        ui.label(format!("⏳ {}", r.path.display()));
+                    }
+                    RowStatus::Done(Ok(())) => {
+                        ui.label(format!("✅ {}", r.path.display()));
+                    }
+                    RowStatus::Done(Err(e)) => {
+                        ui.label(format!("❌ {}：{}", r.path.display(), e));
+                    }
+                }
+            }
+        });
+    }
+}

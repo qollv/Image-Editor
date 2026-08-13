@@ -1,5 +1,7 @@
 use eframe::egui;
 
+use crate::convert_view::ConvertView;
+
 #[derive(PartialEq, Clone, Copy)]
 pub enum Tab {
     Convert,
@@ -8,11 +10,15 @@ pub enum Tab {
 
 pub struct ImageApp {
     tab: Tab,
+    convert: ConvertView,
 }
 
 impl ImageApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        Self { tab: Tab::Convert }
+        Self {
+            tab: Tab::Convert,
+            convert: ConvertView::new(),
+        }
     }
 }
 
@@ -27,9 +33,7 @@ impl eframe::App for ImageApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             match self.tab {
                 Tab::Convert => {
-                    ui.centered_and_justified(|ui| {
-                        ui.label("转换页（待实现）");
-                    });
+                    self.convert.ui(ui);
                 }
                 Tab::Editor => {
                     ui.centered_and_justified(|ui| {
