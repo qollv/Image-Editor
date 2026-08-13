@@ -1,4 +1,5 @@
 mod app;
+mod options;
 
 use eframe::egui;
 
