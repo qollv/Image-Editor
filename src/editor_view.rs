@@ -178,13 +178,13 @@ impl EditorView {
     }
 
     fn img_to_screen(&self, p: egui::Pos2, origin: egui::Pos2) -> egui::Pos2 {
-        origin + self.pan + egui::vec2(p.x, p.y) * self.zoom
+        origin + egui::vec2(p.x, p.y) * self.zoom
     }
 
     fn screen_to_img(&self, p: egui::Pos2, origin: egui::Pos2) -> egui::Pos2 {
         egui::pos2(
-            (p.x - origin.x - self.pan.x) / self.zoom,
-            (p.y - origin.y - self.pan.y) / self.zoom,
+            (p.x - origin.x) / self.zoom,
+            (p.y - origin.y) / self.zoom,
         )
     }
 
