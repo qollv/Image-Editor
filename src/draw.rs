@@ -16,6 +16,7 @@ pub struct Style {
     pub width: f32,
 }
 
+#[allow(dead_code)] // 保留给"选中标注"功能，当前由测试覆盖
 pub fn bbox(ann: &Annotation, style: &Style) -> Option<[f32; 4]> {
     let pad = (style.width / 2.0).ceil();
     let (minx, miny, maxx, maxy) = match ann {

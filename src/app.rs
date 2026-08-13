@@ -1,6 +1,7 @@
 use eframe::egui;
 
 use crate::convert_view::ConvertView;
+use crate::editor_view::EditorView;
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum Tab {
@@ -11,6 +12,7 @@ pub enum Tab {
 pub struct ImageApp {
     tab: Tab,
     convert: ConvertView,
+    editor: EditorView,
 }
 
 impl ImageApp {
@@ -18,6 +20,7 @@ impl ImageApp {
         Self {
             tab: Tab::Convert,
             convert: ConvertView::new(),
+            editor: EditorView::new(),
         }
     }
 }
@@ -36,9 +39,7 @@ impl eframe::App for ImageApp {
                     self.convert.ui(ui);
                 }
                 Tab::Editor => {
-                    ui.centered_and_justified(|ui| {
-                        ui.label("编辑页（待实现）");
-                    });
+                    self.editor.ui(ui);
                 }
             }
         });

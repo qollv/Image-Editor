@@ -3,6 +3,7 @@ mod convert;
 mod convert_view;
 mod draw;
 mod editor;
+mod editor_view;
 mod options;
 
 use eframe::egui;
