@@ -33,8 +33,6 @@ pub struct ConvertOptions {
     pub format: TargetFormat,
     pub jpeg_quality: u8,
     pub png_compression: PngCompression,
-    pub webp_quality: u8,
-    pub webp_lossless: bool,
     pub background: [u8; 3],
     pub on_conflict: OnConflict,
 }
@@ -45,8 +43,6 @@ impl Default for ConvertOptions {
             format: TargetFormat::Png,
             jpeg_quality: 90,
             png_compression: PngCompression::Default,
-            webp_quality: 90,
-            webp_lossless: false,
             background: [255, 255, 255],
             on_conflict: OnConflict::Skip,
         }
