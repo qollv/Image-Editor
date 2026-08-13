@@ -320,13 +320,16 @@ impl EditorView {
             Tool::Crop | Tool::CropRatio => {
                 let (x0, y0) = (sx.min(cx), sy.min(cy));
                 let (x1, y1) = (sx.max(cx), sy.max(cy));
-                let w = (x1 - x0).max(1.0);
-                let h = (y1 - y0).max(1.0);
+                // 四舍五入到像素，使裁剪框边缘与鼠标位置对齐
+                let x0 = x0.max(0.0).round() as u32;
+                let y0 = y0.max(0.0).round() as u32;
+                let x1 = x1.min(doc.image.width() as f32).round() as u32;
+                let y1 = y1.min(doc.image.height() as f32).round() as u32;
                 doc.crop = Some(CropRect {
-                    x: x0.max(0.0) as u32,
-                    y: y0.max(0.0) as u32,
-                    w: w as u32,
-                    h: h as u32,
+                    x: x0,
+                    y: y0,
+                    w: x1.saturating_sub(x0).max(1),
+                    h: y1.saturating_sub(y0).max(1),
                 });
                 return;
             }
@@ -443,22 +446,13 @@ impl EditorView {
             ui.separator();
             let has_doc = self.doc.is_some();
             if ui.add_enabled(has_doc, egui::Button::new("撤销")).clicked() {
-                if let Some(d) = &mut self.doc {
+                {
+                    let d = self.doc.as_mut().unwrap();
                     d.undo();
                     self.dirty = true;
                 }
-            }
-            if ui.add_enabled(has_doc, egui::Button::new("重做")).clicked() {
-                if let Some(d) = &mut self.doc {
-                    d.redo();
-                    self.dirty = true;
-                }
-            }
-            if ui.add_enabled(has_doc, egui::Button::new("删除")).clicked() {
-                if let Some(d) = &mut self.doc {
-                    d.remove_last();
-                    self.dirty = true;
-                }
+                // 撤销的可能是裁剪，恢复原图后需要刷新画布纹理
+                self.refresh_texture(ui.ctx());
             }
             if ui.add_enabled(has_doc, egui::Button::new("清空标注")).clicked() {
                 if let Some(d) = &mut self.doc {
@@ -512,16 +506,15 @@ impl EditorView {
         let (response, painter) =
             ui.allocate_painter(available.max(egui::vec2(200.0, 200.0)), egui::Sense::click_and_drag());
         let rect = response.rect;
-        let origin = rect.min + self.pan;
 
-        // 缩放
+        // 缩放（围绕鼠标位置）
         let zoom_delta = ui.input(|i| i.zoom_delta());
         if response.hovered() && (zoom_delta - 1.0).abs() > 1e-4 {
             if let Some(hover) = response.hover_pos() {
-                let before = self.screen_to_img(hover, origin);
+                let old_origin = rect.min + self.pan;
+                let before = self.screen_to_img(hover, old_origin);
                 self.zoom = (self.zoom * zoom_delta).clamp(0.05, 32.0);
-                let new_origin = rect.min + self.pan;
-                let after = self.img_to_screen(before, new_origin);
+                let after = self.img_to_screen(before, old_origin);
                 self.pan += hover - after;
             }
         }
@@ -530,37 +523,10 @@ impl EditorView {
             self.pan += response.drag_delta();
         }
 
-        // 背景
-        painter.rect_filled(rect, 0.0, egui::Color32::from_gray(32));
+        // 最终画布原点（缩放/平移之后）
+        let origin = rect.min + self.pan;
 
-        if let Some(doc) = &self.doc {
-            // 画图片纹理
-            if let Some(tex) = &self.texture {
-                let img_size = egui::vec2(doc.image.width() as f32, doc.image.height() as f32);
-                let img_rect = egui::Rect::from_min_size(origin, img_size * self.zoom);
-                painter.image(tex.id(), img_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
-            }
-            // 画标注
-            let style = doc.style;
-            for a in &doc.annotations {
-                self.draw_annotation(&painter, a, &style, origin);
-            }
-            // 裁剪框
-            if let Some(c) = doc.crop {
-                let a = self.img_to_screen(egui::pos2(c.x as f32, c.y as f32), origin);
-                let b = self.img_to_screen(egui::pos2((c.x + c.w) as f32, (c.y + c.h) as f32), origin);
-                painter.rect_stroke(
-                    egui::Rect::from_two_pos(a, b),
-                    0.0,
-                    egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(0, 120, 255)),
-                    egui::StrokeKind::Middle,
-                );
-            }
-            // 预览
-            self.draw_preview(&painter, origin);
-        }
-
-        // 鼠标交互：按下立即开始绘制（无拖动阈值），松开提交
+        // 鼠标交互：按下立即开始绘制（无拖动阈值），先更新坐标再绘制，消除一帧滞后
         let is_draw_tool = matches!(
             self.tool,
             Tool::Brush
@@ -627,6 +593,36 @@ impl EditorView {
                 self.text_pos = Some([p.x, p.y]);
                 self.text_input.clear();
             }
+        }
+
+        // 背景
+        painter.rect_filled(rect, 0.0, egui::Color32::from_gray(32));
+
+        if let Some(doc) = &self.doc {
+            // 画图片纹理
+            if let Some(tex) = &self.texture {
+                let img_size = egui::vec2(doc.image.width() as f32, doc.image.height() as f32);
+                let img_rect = egui::Rect::from_min_size(origin, img_size * self.zoom);
+                painter.image(tex.id(), img_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+            }
+            // 画标注
+            let style = doc.style;
+            for a in &doc.annotations {
+                self.draw_annotation(&painter, a, &style, origin);
+            }
+            // 裁剪框
+            if let Some(c) = doc.crop {
+                let a = self.img_to_screen(egui::pos2(c.x as f32, c.y as f32), origin);
+                let b = self.img_to_screen(egui::pos2((c.x + c.w) as f32, (c.y + c.h) as f32), origin);
+                painter.rect_stroke(
+                    egui::Rect::from_two_pos(a, b),
+                    0.0,
+                    egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(0, 120, 255)),
+                    egui::StrokeKind::Middle,
+                );
+            }
+            // 预览
+            self.draw_preview(&painter, origin);
         }
 
         // 状态栏

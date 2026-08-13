@@ -74,6 +74,7 @@ impl EditorDoc {
         }
     }
 
+    #[allow(dead_code)] // 模型保留撤销/重做配对能力，UI 目前只暴露撤销
     pub fn redo(&mut self) {
         if let Some(entry) = self.redo_stack.pop() {
             match entry {
@@ -91,15 +92,6 @@ impl EditorDoc {
                     self.annotations = annotations;
                 }
             }
-        }
-    }
-
-    pub fn remove_last(&mut self) {
-        if !self.annotations.is_empty() {
-            self.undo_stack
-                .push(UndoEntry::Annotations(self.annotations.clone()));
-            self.redo_stack.clear();
-            self.annotations.pop();
         }
     }
 
