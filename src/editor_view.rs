@@ -19,6 +19,20 @@ enum Tool {
     CropRatio,
 }
 
+/// 裁剪框手柄：拖动边/角/整体调整裁剪范围
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CropHandle {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    Move,
+}
+
 pub struct EditorView {
     doc: Option<EditorDoc>,
     path: Option<PathBuf>,
@@ -28,6 +42,9 @@ pub struct EditorView {
     /// 调整拖动前的旧值 (亮度, 对比度, 饱和度)
     adjust_base: Option<(i32, f32, f32)>,
     mosaic_block: u32,
+    needs_center: bool,
+    text_size: f32,
+    crop_handle: Option<CropHandle>,
     zoom: f32,
     pan: egui::Vec2,
     font: fontdue::Font,
@@ -84,6 +101,9 @@ impl EditorView {
             crop_ratio: (1, 1),
             adjust_base: None,
             mosaic_block: 16,
+            needs_center: false,
+            text_size: 24.0,
+            crop_handle: None,
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
             font: load_font(),
@@ -123,6 +143,7 @@ impl EditorView {
                 self.dirty = false;
                 self.zoom = 1.0;
                 self.pan = egui::Vec2::ZERO;
+                self.needs_center = true;
                 self.brush_pts.clear();
                 self.text_pos = None;
                 self.status = "已打开图片".to_string();
@@ -179,6 +200,158 @@ impl EditorView {
             }
         }
         None
+    }
+
+    /// 有效裁剪框（图片坐标 [x0, y0, x1, y1]）；无裁剪框时视为整图。
+    fn effective_crop(&self) -> Option<[f32; 4]> {
+        let doc = self.doc.as_ref()?;
+        if let Some(c) = doc.crop {
+            Some([
+                c.x as f32,
+                c.y as f32,
+                (c.x + c.w) as f32,
+                (c.y + c.h) as f32,
+            ])
+        } else {
+            Some([
+                0.0,
+                0.0,
+                doc.image.width() as f32,
+                doc.image.height() as f32,
+            ])
+        }
+    }
+
+    /// 检测鼠标位置命中的裁剪框手柄。
+    fn detect_crop_handle(
+        &self,
+        pos: egui::Pos2,
+        rect: [f32; 4],
+        origin: egui::Pos2,
+        thr: f32,
+    ) -> Option<CropHandle> {
+        let p0 = self.img_to_screen(egui::pos2(rect[0], rect[1]), origin);
+        let p1 = self.img_to_screen(egui::pos2(rect[2], rect[3]), origin);
+        let corners = [
+            (p0, CropHandle::TopLeft),
+            (egui::pos2(p1.x, p0.y), CropHandle::TopRight),
+            (p1, CropHandle::BottomRight),
+            (egui::pos2(p0.x, p1.y), CropHandle::BottomLeft),
+        ];
+        for (c, h) in corners {
+            if (pos - c).length() < thr {
+                return Some(h);
+            }
+        }
+        if (pos.y - p0.y).abs() < thr && pos.x >= p0.x && pos.x <= p1.x {
+            return Some(CropHandle::Top);
+        }
+        if (pos.y - p1.y).abs() < thr && pos.x >= p0.x && pos.x <= p1.x {
+            return Some(CropHandle::Bottom);
+        }
+        if (pos.x - p0.x).abs() < thr && pos.y >= p0.y && pos.y <= p1.y {
+            return Some(CropHandle::Left);
+        }
+        if (pos.x - p1.x).abs() < thr && pos.y >= p0.y && pos.y <= p1.y {
+            return Some(CropHandle::Right);
+        }
+        if pos.x >= p0.x && pos.x <= p1.x && pos.y >= p0.y && pos.y <= p1.y {
+            return Some(CropHandle::Move);
+        }
+        None
+    }
+
+    /// 根据手柄和鼠标位置更新裁剪框（keep_ratio 时角拖动保持比例）。
+    fn apply_crop_drag(&mut self, handle: CropHandle, pos: egui::Pos2, origin: egui::Pos2, keep_ratio: bool) {
+        let p = self.screen_to_img(pos, origin);
+        let Some(doc) = self.doc.as_mut() else { return };
+        let (img_w, img_h) = (doc.image.width() as f32, doc.image.height() as f32);
+        let rect = doc
+            .crop
+            .map(|c| [c.x as f32, c.y as f32, (c.x + c.w) as f32, (c.y + c.h) as f32])
+            .unwrap_or([0.0, 0.0, img_w, img_h]);
+        let (mut x0, mut y0, mut x1, mut y1) = (rect[0], rect[1], rect[2], rect[3]);
+
+        if keep_ratio {
+            let (rw, rh) = (self.crop_ratio.0 as f32, self.crop_ratio.1 as f32);
+            // 比例裁剪：角拖动以对角为锚保持比例
+            match handle {
+                CropHandle::BottomRight => {
+                    let w = (p.x - x0).abs();
+                    let h = (p.y - y0).abs();
+                    let s = (w / rw).max(h / rh);
+                    x1 = x0 + s * rw * (p.x - x0).signum();
+                    y1 = y0 + s * rh * (p.y - y0).signum();
+                }
+                CropHandle::TopLeft => {
+                    let w = (x1 - p.x).abs();
+                    let h = (y1 - p.y).abs();
+                    let s = (w / rw).max(h / rh);
+                    x0 = x1 - s * rw * (x1 - p.x).signum();
+                    y0 = y1 - s * rh * (y1 - p.y).signum();
+                }
+                CropHandle::BottomLeft => {
+                    let w = (x1 - p.x).abs();
+                    let h = (p.y - y0).abs();
+                    let s = (w / rw).max(h / rh);
+                    x0 = x1 - s * rw * (x1 - p.x).signum();
+                    y1 = y0 + s * rh * (p.y - y0).signum();
+                }
+                CropHandle::TopRight => {
+                    let w = (p.x - x0).abs();
+                    let h = (y1 - p.y).abs();
+                    let s = (w / rw).max(h / rh);
+                    x1 = x0 + s * rw * (p.x - x0).signum();
+                    y0 = y1 - s * rh * (y1 - p.y).signum();
+                }
+                _ => {}
+            }
+        } else {
+            match handle {
+                CropHandle::Top => y0 = p.y,
+                CropHandle::Bottom => y1 = p.y,
+                CropHandle::Left => x0 = p.x,
+                CropHandle::Right => x1 = p.x,
+                CropHandle::TopLeft => {
+                    x0 = p.x;
+                    y0 = p.y;
+                }
+                CropHandle::TopRight => {
+                    x1 = p.x;
+                    y0 = p.y;
+                }
+                CropHandle::BottomLeft => {
+                    x0 = p.x;
+                    y1 = p.y;
+                }
+                CropHandle::BottomRight => {
+                    x1 = p.x;
+                    y1 = p.y;
+                }
+                CropHandle::Move => {}
+            }
+        }
+
+        // 边界与最小尺寸
+        let (mut x0, mut y0, mut x1, mut y1) = (x0, y0, x1, y1);
+        if x1 < x0 {
+            std::mem::swap(&mut x0, &mut x1);
+        }
+        if y1 < y0 {
+            std::mem::swap(&mut y0, &mut y1);
+        }
+        let min = 8.0_f32;
+        x0 = x0.clamp(0.0, img_w - min);
+        y0 = y0.clamp(0.0, img_h - min);
+        x1 = x1.clamp(x0 + min, img_w);
+        y1 = y1.clamp(y0 + min, img_h);
+
+        doc.crop = Some(CropRect {
+            x: x0.round() as u32,
+            y: y0.round() as u32,
+            w: (x1 - x0).round().max(1.0) as u32,
+            h: (y1 - y0).round().max(1.0) as u32,
+        });
     }
 
     /// 生成图片内居中的、能容纳的最大比例裁剪框。
@@ -392,22 +565,6 @@ impl EditorView {
                 max: [sx.max(cx), sy.max(cy)],
                 block: self.mosaic_block,
             },
-            Tool::Crop | Tool::CropRatio => {
-                let (x0, y0) = (sx.min(cx), sy.min(cy));
-                let (x1, y1) = (sx.max(cx), sy.max(cy));
-                // 四舍五入到像素，使裁剪框边缘与鼠标位置对齐
-                let x0 = x0.max(0.0).round() as u32;
-                let y0 = y0.max(0.0).round() as u32;
-                let x1 = x1.min(doc.image.width() as f32).round() as u32;
-                let y1 = y1.min(doc.image.height() as f32).round() as u32;
-                doc.crop = Some(CropRect {
-                    x: x0,
-                    y: y0,
-                    w: x1.saturating_sub(x0).max(1),
-                    h: y1.saturating_sub(y0).max(1),
-                });
-                return;
-            }
             _ => return,
         };
         doc.push_annotation(ann);
@@ -604,18 +761,29 @@ impl EditorView {
         });
 
         ui.horizontal(|ui| {
-            if let Some(doc) = &mut self.doc {
-                let mut color = egui::Color32::from_rgba_unmultiplied(
-                    doc.style.color[0],
-                    doc.style.color[1],
-                    doc.style.color[2],
-                    doc.style.color[3],
-                );
-                ui.label("颜色:");
-                ui.color_edit_button_srgba(&mut color);
-                doc.style.color = color.to_array();
-                ui.label("线宽:");
-                ui.add(egui::Slider::new(&mut doc.style.width, 1.0..=20.0));
+            // 颜色/线宽只在绘制图形类工具时显示
+            let show_style = matches!(
+                self.tool,
+                Tool::Brush | Tool::Line | Tool::Arrow | Tool::Rect | Tool::Ellipse
+            );
+            if show_style {
+                if let Some(doc) = &mut self.doc {
+                    let mut color = egui::Color32::from_rgba_unmultiplied(
+                        doc.style.color[0],
+                        doc.style.color[1],
+                        doc.style.color[2],
+                        doc.style.color[3],
+                    );
+                    ui.label("颜色:");
+                    ui.color_edit_button_srgba(&mut color);
+                    doc.style.color = color.to_array();
+                    ui.label("线宽:");
+                    ui.add(egui::Slider::new(&mut doc.style.width, 1.0..=20.0));
+                }
+            }
+            if self.tool == Tool::Text {
+                ui.label("字号:");
+                ui.add(egui::Slider::new(&mut self.text_size, 8.0..=120.0));
             }
             if self.tool == Tool::CropRatio {
                 ui.label("比例:");
@@ -627,6 +795,19 @@ impl EditorView {
                         if let Some(doc) = &mut self.doc {
                             doc.crop = Some(Self::make_ratio_crop((w, h), doc));
                         }
+                    }
+                }
+                // 自定义比例
+                let mut cw = self.crop_ratio.0;
+                let mut ch = self.crop_ratio.1;
+                ui.label("自定义:");
+                let wr = ui.add(egui::DragValue::new(&mut cw).range(1..=10000).speed(0.1));
+                ui.label(":");
+                let hr = ui.add(egui::DragValue::new(&mut ch).range(1..=10000).speed(0.1));
+                if (wr.changed() || hr.changed()) && cw > 0 && ch > 0 {
+                    self.crop_ratio = (cw, ch);
+                    if let Some(doc) = &mut self.doc {
+                        doc.crop = Some(Self::make_ratio_crop((cw, ch), doc));
                     }
                 }
             }
@@ -717,7 +898,7 @@ impl EditorView {
                         doc.push_annotation(Annotation::Text {
                             pos,
                             content: std::mem::take(&mut self.text_input),
-                            size: 24.0,
+                            size: self.text_size,
                         });
                         self.dirty = true;
                         self.selected = Some(doc.annotations.len() - 1);
@@ -761,6 +942,21 @@ impl EditorView {
             self.pan += response.drag_delta();
         }
 
+        // 打开图片后居中显示一次
+        if self.needs_center {
+            if let Some(doc) = &self.doc {
+                let scaled = egui::vec2(
+                    doc.image.width() as f32 * self.zoom,
+                    doc.image.height() as f32 * self.zoom,
+                );
+                self.pan = egui::vec2(
+                    (rect.width() - scaled.x) / 2.0,
+                    (rect.height() - scaled.y) / 2.0,
+                );
+            }
+            self.needs_center = false;
+        }
+
         // 最终画布原点（缩放/平移之后）
         let origin = rect.min + self.pan;
 
@@ -773,8 +969,6 @@ impl EditorView {
                 | Tool::Rect
                 | Tool::Ellipse
                 | Tool::Mosaic
-                | Tool::Crop
-                | Tool::CropRatio
         );
         let (pressed, released, down) = ui.input(|i| {
             (
@@ -808,17 +1002,6 @@ impl EditorView {
                     if !dup {
                         self.brush_pts.push([self.cur_img.x, self.cur_img.y]);
                     }
-                }
-                // 比例裁剪：约束宽高比
-                if self.tool == Tool::CropRatio {
-                    let (rw, rh) = self.crop_ratio;
-                    let dx = self.cur_img.x - self.start_img.x;
-                    let dy = self.cur_img.y - self.start_img.y;
-                    let scale = (dx.abs() / rw as f32).max(dy.abs() / rh as f32);
-                    self.cur_img = egui::pos2(
-                        self.start_img.x + scale * rw as f32 * dx.signum(),
-                        self.start_img.y + scale * rh as f32 * dy.signum(),
-                    );
                 }
             }
         }
@@ -860,6 +1043,29 @@ impl EditorView {
             }
             if self.drag_annot && released {
                 self.drag_annot = false;
+            }
+        }
+        // Crop/CropRatio：拖动裁剪框边缘/角调整范围
+        if self.tool == Tool::Crop || self.tool == Tool::CropRatio {
+            let keep_ratio = self.tool == Tool::CropRatio;
+            let thr = 8.0;
+            if response.hovered() && pressed {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    if let Some(rect) = self.effective_crop() {
+                        self.crop_handle = self.detect_crop_handle(pos, rect, origin, thr);
+                    }
+                }
+            }
+            if self.crop_handle.is_some() && down {
+                if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                    if let Some(handle) = self.crop_handle {
+                        self.apply_crop_drag(handle, pos, origin, keep_ratio);
+                        self.dirty = true;
+                    }
+                }
+            }
+            if self.crop_handle.is_some() && released {
+                self.crop_handle = None;
             }
         }
         // 文字：单击放置（就地弹出输入框）
