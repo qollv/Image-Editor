@@ -185,6 +185,8 @@ impl EditorView {
                 crate::draw::rasterize(&a.shape, &a.style, &mut rgba, None);
             }
         }
+        // 透明区域垫暗色棋盘格（仅显示用，不进保存结果）
+        crate::editor::composite_checkerboard(&mut rgba);
         self.upload_texture(ctx, &rgba);
         self.texture_fingerprint = Some((version, keys));
     }
@@ -463,7 +465,12 @@ impl EditorView {
         self.canvas_ui(ui);
 
         // 状态栏
-        ui.label(&self.status);
+        let theme = crate::theme::Theme::dark();
+        ui.label(
+            egui::RichText::new(&self.status)
+                .small()
+                .color(theme.text_muted),
+        );
 
         self.handle_shortcuts(ui);
 

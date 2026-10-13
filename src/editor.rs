@@ -436,6 +436,42 @@ fn apply_saturation(out: &mut image::RgbaImage, factor: f32) {
     }
 }
 
+/// 把 RGBA 图合成到暗色棋盘格上——仅用于画布纹理显示，不用于保存。
+/// 透明区域显示棋盘格是图片工具的行业惯例（Photoshop 同款），
+/// 用户可直观判断哪些区域真的透明；同时比纯色底更精致。
+/// 无透明像素时快速返回（预检一遍 alpha，不碰像素）。
+/// 棋盘格两色与主题 token 的 checker_a/checker_b 保持一致。
+/// 保留经典 `% 2 == 0` 写法（比新版 is_multiple_of 直观，团队约定语法朴素）
+#[allow(clippy::manual_is_multiple_of)]
+pub fn composite_checkerboard(img: &mut image::RgbaImage) {
+    if !img.pixels().any(|p| p[3] < 255) {
+        return;
+    }
+    const CELL: u32 = 8; // 棋盘格边长（图内像素）
+    let checker_a = [0x2B_u8, 0x2C, 0x34];
+    let checker_b = [0x22_u8, 0x23, 0x2A];
+    let (w, h) = (img.width(), img.height());
+    for y in 0..h {
+        for x in 0..w {
+            let p = img.get_pixel_mut(x, y);
+            let a = p[3];
+            if a == 255 {
+                continue;
+            }
+            let alpha = a as f32 / 255.0;
+            let cell = if (x / CELL + y / CELL) % 2 == 0 {
+                checker_a
+            } else {
+                checker_b
+            };
+            for i in 0..3 {
+                p[i] = (p[i] as f32 * alpha + cell[i] as f32 * (1.0 - alpha)) as u8;
+            }
+            p[3] = 255;
+        }
+    }
+}
+
 fn pixelate_image(img: &image::DynamicImage, block_size: u32) -> image::DynamicImage {
     let src = img.to_rgba8();
     let (w, h) = (src.width(), src.height());

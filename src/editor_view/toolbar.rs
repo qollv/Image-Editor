@@ -23,7 +23,8 @@ impl EditorView {
     }
 
     pub(super) fn toolbar_ui(&mut self, ui: &mut egui::Ui) {
-        // 第一行：打开 + 工具选择
+        let theme = crate::theme::Theme::dark();
+        // 第一行：打开 + 工具选择（工具按钮定宽，选中态用主题 selection 视觉）
         ui.horizontal(|ui| {
             if ui.button("打开图片…").clicked() {
                 if self.dirty {
@@ -45,7 +46,20 @@ impl EditorView {
                 Tool::Crop,
                 Tool::CropRatio,
             ] {
-                ui.selectable_value(&mut self.tool, t, Self::tool_label(t));
+                let selected = self.tool == t;
+                let btn = egui::Button::new(
+                    egui::RichText::new(Self::tool_label(t)).color(if selected {
+                        egui::Color32::WHITE
+                    } else {
+                        theme.text_secondary
+                    }),
+                )
+                .selected(selected)
+                .corner_radius(theme.radius_button)
+                .min_size(egui::vec2(52.0, 26.0));
+                if ui.add(btn).clicked() {
+                    self.tool = t;
+                }
             }
         });
 
@@ -186,7 +200,7 @@ impl EditorView {
             }
             ui.separator();
             if ui
-                .add_enabled(has_doc, egui::Button::new("保存"))
+                .add_enabled(has_doc, egui::Button::new("保存").fill(theme.accent))
                 .clicked()
             {
                 self.save_dialog = true;
@@ -265,7 +279,8 @@ impl EditorView {
                             // 预览模式：只渲染小图并上传，不动 doc.image
                             // （画布几何仍基于全分辨率，纹理拉伸显示）
                             if let Some(doc) = &self.doc {
-                                let img = doc.render_preview(pv);
+                                let mut img = doc.render_preview(pv);
+                                crate::editor::composite_checkerboard(&mut img);
                                 self.upload_texture(&ctx, &img);
                             }
                         } else {

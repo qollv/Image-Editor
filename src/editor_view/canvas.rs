@@ -346,6 +346,7 @@ impl EditorView {
     }
 
     pub(super) fn canvas_ui(&mut self, ui: &mut egui::Ui) {
+        let theme = crate::theme::Theme::dark();
         let available = ui.available_size();
         let (response, painter) =
             ui.allocate_painter(available.max(egui::vec2(200.0, 200.0)), egui::Sense::click_and_drag());
@@ -521,8 +522,8 @@ impl EditorView {
             }
         }
 
-        // 背景
-        painter.rect_filled(rect, 0.0, egui::Color32::from_gray(32));
+        // 背景（画布包围色，比面板更深，让图片成为视觉焦点）
+        painter.rect_filled(rect, 0.0, theme.canvas_bg);
 
         if let Some(doc) = &self.doc {
             // 画图片纹理
