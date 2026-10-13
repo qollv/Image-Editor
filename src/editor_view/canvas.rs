@@ -233,16 +233,24 @@ impl EditorView {
                 let p0 = self.img_to_screen(egui::pos2(start[0], start[1]), origin);
                 let p1 = self.img_to_screen(egui::pos2(end[0], end[1]), origin);
                 let dir = (p1 - p0).normalized();
-                let head = 14.0;
                 let perp = egui::vec2(-dir.y, dir.x);
+                // 头部随线宽缩放的实心三角（长 3.2 倍、半宽 1.1 倍线宽），
+                // 与保存路径 draw.rs 同一几何——固定 14px 的"<"粗线头在线宽
+                // 一粗就会两翼叠咬糊成疙瘩（用户报告的 bug）
+                let w = stroke.width.max(1.0);
+                let head = w * 3.2;
+                let half = w * 1.1;
                 let base = p1 - dir * head;
                 // 主线：start → 基底中心
                 painter.line_segment([p0, base], stroke);
-                // 头部三角：两个底角 → 尖端
-                let c1 = base + perp * head * 0.5;
-                let c2 = base - perp * head * 0.5;
-                painter.line_segment([c1, p1], stroke);
-                painter.line_segment([c2, p1], stroke);
+                // 头部：实心三角（基底两角 → 尖端）
+                let c1 = base + perp * half;
+                let c2 = base - perp * half;
+                painter.add(egui::Shape::convex_polygon(
+                    vec![c1, p1, c2],
+                    c,
+                    egui::Stroke::NONE,
+                ));
             }
             Shape::Rect { min, max } => {
                 let a = self.img_to_screen(egui::pos2(min[0], min[1]), origin);
@@ -301,13 +309,20 @@ impl EditorView {
             Tool::Arrow => {
                 let dir = (b - a).normalized();
                 let perp = egui::vec2(-dir.y, dir.x);
-                let head = 14.0;
+                // 与 draw_annotation / draw.rs 保存路径同一套几何：
+                // 随线宽缩放的实心三角头
+                let w = stroke.width.max(1.0);
+                let head = w * 3.2;
+                let half = w * 1.1;
                 let base = b - dir * head;
                 painter.line_segment([a, base], stroke);
-                let c1 = base + perp * head * 0.5;
-                let c2 = base - perp * head * 0.5;
-                painter.line_segment([c1, b], stroke);
-                painter.line_segment([c2, b], stroke);
+                let c1 = base + perp * half;
+                let c2 = base - perp * half;
+                painter.add(egui::Shape::convex_polygon(
+                    vec![c1, b, c2],
+                    c,
+                    egui::Stroke::NONE,
+                ));
             }
             Tool::Rect | Tool::Ellipse | Tool::Mosaic => {
                 let rect = egui::Rect::from_two_pos(a, b);

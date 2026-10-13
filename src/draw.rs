@@ -28,7 +28,12 @@ pub struct Style {
 }
 
 pub fn bbox(shape: &Shape, style: &Style) -> Option<[f32; 4]> {
-    let pad = (style.width / 2.0).ceil();
+    // 箭头头部是实心三角，向垂直方向扩展 1.1 倍线宽，比普通标注的半线宽大
+    let pad = if matches!(shape, Shape::Arrow { .. }) {
+        (style.width * 1.1).ceil()
+    } else {
+        (style.width / 2.0).ceil()
+    };
     let (minx, miny, maxx, maxy) = match shape {
         Shape::Brush(pts) => {
             if pts.is_empty() {
@@ -114,6 +119,48 @@ fn line(img: &mut RgbaImage, x0: i64, y0: i64, x1: i64, y1: i64, c: [u8; 4], r: 
     }
 }
 
+/// 实心三角形扫描线填充（箭头头部用）。
+/// 顶点按 y 排序后，每条扫描线取长边与短边的交点区间填满。
+fn fill_triangle(img: &mut RgbaImage, pts: [[f32; 2]; 3], c: [u8; 4]) {
+    let mut p = pts;
+    if p[0][1] > p[1][1] {
+        p.swap(0, 1);
+    }
+    if p[1][1] > p[2][1] {
+        p.swap(1, 2);
+        if p[0][1] > p[1][1] {
+            p.swap(0, 1);
+        }
+    }
+    let (top, mid, bot) = (p[0], p[1], p[2]);
+    let height = bot[1] - top[1];
+    if height < 0.5 {
+        return; // 近平铺的退化三角形
+    }
+    for y in (top[1].ceil() as i64)..=(bot[1].floor() as i64) {
+        let fy = y as f32;
+        // 长边（top→bot）交点
+        let t_long = (fy - top[1]) / height;
+        let x_long = top[0] + t_long * (bot[0] - top[0]);
+        // 短边交点：fy 落在 top→mid 段还是 mid→bot 段
+        let x_short = if fy < mid[1] {
+            let span = (mid[1] - top[1]).max(f32::EPSILON);
+            top[0] + (fy - top[1]) / span * (mid[0] - top[0])
+        } else {
+            let span = (bot[1] - mid[1]).max(f32::EPSILON);
+            mid[0] + (fy - mid[1]) / span * (bot[0] - mid[0])
+        };
+        let (x0, x1) = if x_long <= x_short {
+            (x_long, x_short)
+        } else {
+            (x_short, x_long)
+        };
+        for x in (x0.round() as i64)..=(x1.round() as i64) {
+            put(img, x, y, c);
+        }
+    }
+}
+
 pub fn rasterize(shape: &Shape, style: &Style, img: &mut RgbaImage, font: Option<&fontdue::Font>) {
     let c = style.color;
     // 线宽 → 圆盘半径：width=1 → r=0（单像素），width=3 → r=1，以此类推
@@ -152,8 +199,13 @@ pub fn rasterize(shape: &Shape, style: &Style, img: &mut RgbaImage, font: Option
             let len = (dx * dx + dy * dy).sqrt().max(1.0);
             let (ux, uy) = (dx / len, dy / len);
             let (hx, hy) = (-uy, ux);
-            let head = 14.0_f32;
-            let half = head * 0.5;
+            // 头部尺寸随线宽缩放（长 3.2 倍、半宽 1.1 倍线宽）。
+            // 旧实现用固定 14px 的两段粗线画"<"头：线宽一粗（如 12.7），
+            // 两翼互相叠咬、平头帽留缺口，糊成带缺口的疙瘩。实心三角 +
+            // 按线宽缩放在任何粗细下都是干净头部，且与画布预览几何一致。
+            let w = style.width.max(1.0);
+            let head = w * 3.2;
+            let half = w * 1.1;
             // 基底中心
             let (bx, by) = (end[0] - ux * head, end[1] - uy * head);
             // 主线：start → 基底中心
@@ -166,24 +218,15 @@ pub fn rasterize(shape: &Shape, style: &Style, img: &mut RgbaImage, font: Option
                 c,
                 r,
             );
-            // 头部三角：两个底角 → 尖端，形成标准箭头
-            line(
+            // 头部：实心三角（基底两角 → 尖端）
+            fill_triangle(
                 img,
-                (bx + hx * half) as i64,
-                (by + hy * half) as i64,
-                end[0] as i64,
-                end[1] as i64,
+                [
+                    [bx + hx * half, by + hy * half],
+                    [end[0], end[1]],
+                    [bx - hx * half, by - hy * half],
+                ],
                 c,
-                r,
-            );
-            line(
-                img,
-                (bx - hx * half) as i64,
-                (by - hy * half) as i64,
-                end[0] as i64,
-                end[1] as i64,
-                c,
-                r,
             );
         }
         Shape::Rect { min, max } => {
@@ -371,8 +414,8 @@ mod tests {
     }
 
     #[test]
-    fn arrow_has_triangle_head() {
-        // 水平箭头 start=(2,10) end=(30,10)，head=14, half=7
+    fn arrow_has_filled_triangle_head() {
+        // 水平箭头 start=(2,10) end=(30,10)，width=1 → head=3.2, half=1.1
         let a = Shape::Arrow {
             start: [2.0, 10.0],
             end: [30.0, 10.0],
@@ -381,13 +424,36 @@ mod tests {
         rasterize(&a, &style(1.0), &mut img, None);
         // 尖端
         assert_eq!(img.get_pixel(30, 10), &image::Rgba([255, 0, 0, 255]));
+        // 头部内部为实心（旧实现是空心 "<"，粗线下会糊成疙瘩）
+        assert_eq!(img.get_pixel(28, 10), &image::Rgba([255, 0, 0, 255]));
         // 主线中段
         assert_eq!(img.get_pixel(10, 10), &image::Rgba([255, 0, 0, 255]));
-        // 头部两个底角（base=(16,10)，垂直方向 ±7）
-        assert_eq!(img.get_pixel(16, 3), &image::Rgba([255, 0, 0, 255]));
-        assert_eq!(img.get_pixel(16, 17), &image::Rgba([255, 0, 0, 255]));
-        // 头部三角形内部应为空（空心箭头）
-        assert_eq!(img.get_pixel(20, 10), &image::Rgba([0, 0, 0, 0]));
+        // 翅膀上方外侧应为空
+        assert_eq!(img.get_pixel(27, 5), &image::Rgba([0, 0, 0, 0]));
+        // 超出尖端的延长线应为空（主线只到基底）
+        assert_eq!(img.get_pixel(33, 10), &image::Rgba([0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn arrow_head_scales_with_stroke_width() {
+        // 粗线回归（用户报告的 bug）：width=12.7 时头部必须按线宽放大成
+        // 干净实心三角，而不是固定 14px 两翼叠咬出的糊疙瘩
+        let a = Shape::Arrow {
+            start: [2.0, 10.0],
+            end: [100.0, 10.0],
+        };
+        let mut img = image::RgbaImage::new(140, 60);
+        rasterize(&a, &style(12.7), &mut img, None);
+        // head = 12.7*3.2 ≈ 40.6 → 基底中心 x≈59.4；half = 12.7*1.1 ≈ 14
+        // 头部内部实心
+        assert_eq!(img.get_pixel(80, 10), &image::Rgba([255, 0, 0, 255]));
+        assert_eq!(img.get_pixel(70, 15), &image::Rgba([255, 0, 0, 255]));
+        // 基底外侧（翅膀之外）应为空
+        assert_eq!(img.get_pixel(50, 25), &image::Rgba([0, 0, 0, 0]));
+        // 超出尖端的延长线应为空
+        assert_eq!(img.get_pixel(110, 10), &image::Rgba([0, 0, 0, 0]));
+        // 主线中段上下方应为空（主线比头部区域窄）
+        assert_eq!(img.get_pixel(30, 2), &image::Rgba([0, 0, 0, 0]));
     }
 
     #[test]
