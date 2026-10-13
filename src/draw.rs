@@ -1,7 +1,8 @@
 use image::RgbaImage;
 
+/// 标注的几何形状（不含样式）。
 #[derive(Clone, Debug)]
-pub enum Annotation {
+pub enum Shape {
     Brush(Vec<[f32; 2]>),
     Line { start: [f32; 2], end: [f32; 2] },
     Arrow { start: [f32; 2], end: [f32; 2] },
@@ -12,16 +13,24 @@ pub enum Annotation {
     Mosaic { min: [f32; 2], max: [f32; 2], block: u32 },
 }
 
+/// 一条完整标注 = 几何形状 + 创建时定格的自身样式。
+/// 之后在工具栏改颜色/线宽只影响新标注，不污染已画的标注。
+#[derive(Clone, Debug)]
+pub struct Annotation {
+    pub shape: Shape,
+    pub style: Style,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Style {
     pub color: [u8; 4],
     pub width: f32,
 }
 
-pub fn bbox(ann: &Annotation, style: &Style) -> Option<[f32; 4]> {
+pub fn bbox(shape: &Shape, style: &Style) -> Option<[f32; 4]> {
     let pad = (style.width / 2.0).ceil();
-    let (minx, miny, maxx, maxy) = match ann {
-        Annotation::Brush(pts) => {
+    let (minx, miny, maxx, maxy) = match shape {
+        Shape::Brush(pts) => {
             if pts.is_empty() {
                 return None;
             }
@@ -34,7 +43,7 @@ pub fn bbox(ann: &Annotation, style: &Style) -> Option<[f32; 4]> {
             }
             (x0, y0, x1, y1)
         }
-        Annotation::Line { start, end } | Annotation::Arrow { start, end } => {
+        Shape::Line { start, end } | Shape::Arrow { start, end } => {
             (
                 start[0].min(end[0]),
                 start[1].min(end[1]),
@@ -42,9 +51,7 @@ pub fn bbox(ann: &Annotation, style: &Style) -> Option<[f32; 4]> {
                 start[1].max(end[1]),
             )
         }
-        Annotation::Rect { min, max }
-        | Annotation::Ellipse { min, max }
-        | Annotation::Mosaic { min, max, .. } => {
+        Shape::Rect { min, max } | Shape::Ellipse { min, max } | Shape::Mosaic { min, max, .. } => {
             (
                 min[0].min(max[0]),
                 min[1].min(max[1]),
@@ -52,7 +59,7 @@ pub fn bbox(ann: &Annotation, style: &Style) -> Option<[f32; 4]> {
                 min[1].max(max[1]),
             )
         }
-        Annotation::Text { pos, content, size } => {
+        Shape::Text { pos, content, size } => {
             // 近似宽度：每个字符约 0.6 倍字号（中文等宽近似）
             let w = content.chars().count() as f32 * *size * 0.6;
             (pos[0], pos[1], pos[0] + w, pos[1] + size)
@@ -107,12 +114,12 @@ fn line(img: &mut RgbaImage, x0: i64, y0: i64, x1: i64, y1: i64, c: [u8; 4], r: 
     }
 }
 
-pub fn rasterize(ann: &Annotation, style: &Style, img: &mut RgbaImage, font: Option<&fontdue::Font>) {
+pub fn rasterize(shape: &Shape, style: &Style, img: &mut RgbaImage, font: Option<&fontdue::Font>) {
     let c = style.color;
     // 线宽 → 圆盘半径：width=1 → r=0（单像素），width=3 → r=1，以此类推
     let r = ((style.width - 1.0) / 2.0).ceil().max(0.0) as i64;
-    match ann {
-        Annotation::Brush(pts) => {
+    match shape {
+        Shape::Brush(pts) => {
             if pts.len() == 1 {
                 put_disc(img, pts[0][0] as i64, pts[0][1] as i64, r, c);
             }
@@ -128,7 +135,7 @@ pub fn rasterize(ann: &Annotation, style: &Style, img: &mut RgbaImage, font: Opt
                 );
             }
         }
-        Annotation::Line { start, end } => {
+        Shape::Line { start, end } => {
             line(
                 img,
                 start[0] as i64,
@@ -139,7 +146,7 @@ pub fn rasterize(ann: &Annotation, style: &Style, img: &mut RgbaImage, font: Opt
                 r,
             );
         }
-        Annotation::Arrow { start, end } => {
+        Shape::Arrow { start, end } => {
             let dx = end[0] - start[0];
             let dy = end[1] - start[1];
             let len = (dx * dx + dy * dy).sqrt().max(1.0);
@@ -179,7 +186,7 @@ pub fn rasterize(ann: &Annotation, style: &Style, img: &mut RgbaImage, font: Opt
                 r,
             );
         }
-        Annotation::Rect { min, max } => {
+        Shape::Rect { min, max } => {
             let (x0, y0) = (min[0] as i64, min[1] as i64);
             let (x1, y1) = (max[0] as i64, max[1] as i64);
             line(img, x0, y0, x1, y0, c, r);
@@ -187,14 +194,14 @@ pub fn rasterize(ann: &Annotation, style: &Style, img: &mut RgbaImage, font: Opt
             line(img, x1, y1, x0, y1, c, r);
             line(img, x0, y1, x0, y0, c, r);
         }
-        Annotation::Ellipse { min, max } => {
+        Shape::Ellipse { min, max } => {
             let cx = ((min[0] + max[0]) / 2.0) as i64;
             let cy = ((min[1] + max[1]) / 2.0) as i64;
             let rx = ((max[0] - min[0]).abs() / 2.0) as i64;
             let ry = ((max[1] - min[1]).abs() / 2.0) as i64;
             midpoint_ellipse(img, cx, cy, rx, ry, c);
         }
-        Annotation::Mosaic { min, max, block } => {
+        Shape::Mosaic { min, max, block } => {
             // 马赛克：把矩形区域按块取平均色（像素化遮挡）
             let x0 = min[0].max(0.0) as u32;
             let y0 = min[1].max(0.0) as u32;
@@ -235,7 +242,7 @@ pub fn rasterize(ann: &Annotation, style: &Style, img: &mut RgbaImage, font: Opt
                 }
             }
         }
-        Annotation::Text { pos, content, size } => {
+        Shape::Text { pos, content, size } => {
             if let Some(font) = font {
                 let mut cursor = 0.0_f32;
                 for ch in content.chars() {
@@ -310,14 +317,9 @@ fn midpoint_ellipse(img: &mut RgbaImage, cx: i64, cy: i64, rx: i64, ry: i64, c: 
     }
 }
 
-pub fn rasterize_all(
-    anns: &[Annotation],
-    style: &Style,
-    img: &mut RgbaImage,
-    font: Option<&fontdue::Font>,
-) {
+pub fn rasterize_all(anns: &[Annotation], img: &mut RgbaImage, font: Option<&fontdue::Font>) {
     for a in anns {
-        rasterize(a, style, img, font);
+        rasterize(&a.shape, &a.style, img, font);
     }
 }
 
@@ -325,37 +327,36 @@ pub fn rasterize_all(
 mod tests {
     use super::*;
 
+    fn style(width: f32) -> Style {
+        Style {
+            color: [255, 0, 0, 255],
+            width,
+        }
+    }
+
     #[test]
     fn line_bbox() {
-        let a = Annotation::Line {
+        let a = Shape::Line {
             start: [10.0, 20.0],
             end: [30.0, 5.0],
         };
-        let s = Style {
-            color: [255, 0, 0, 255],
-            width: 2.0,
-        };
-        let b = bbox(&a, &s).unwrap();
+        let b = bbox(&a, &style(2.0)).unwrap();
         // bbox 含线宽一半的 padding（width=2 → pad=1）
         assert_eq!(b, [9.0, 4.0, 22.0, 17.0]);
     }
 
     #[test]
     fn brush_rasterize_sets_pixels() {
-        let a = Annotation::Brush(vec![[1.0, 1.0], [2.0, 1.0], [3.0, 1.0]]);
-        let s = Style {
-            color: [255, 0, 0, 255],
-            width: 1.0,
-        };
+        let a = Shape::Brush(vec![[1.0, 1.0], [2.0, 1.0], [3.0, 1.0]]);
         let mut img = image::RgbaImage::new(5, 5);
-        rasterize(&a, &s, &mut img, None);
+        rasterize(&a, &style(1.0), &mut img, None);
         let p = img.get_pixel(1, 1);
         assert_eq!(p, &image::Rgba([255, 0, 0, 255]));
     }
 
     #[test]
     fn rect_rasterize_draws_border() {
-        let a = Annotation::Rect {
+        let a = Shape::Rect {
             min: [0.0, 0.0],
             max: [4.0, 4.0],
         };
@@ -372,16 +373,12 @@ mod tests {
     #[test]
     fn arrow_has_triangle_head() {
         // 水平箭头 start=(2,10) end=(30,10)，head=14, half=7
-        let a = Annotation::Arrow {
+        let a = Shape::Arrow {
             start: [2.0, 10.0],
             end: [30.0, 10.0],
         };
-        let s = Style {
-            color: [255, 0, 0, 255],
-            width: 1.0,
-        };
         let mut img = image::RgbaImage::new(40, 40);
-        rasterize(&a, &s, &mut img, None);
+        rasterize(&a, &style(1.0), &mut img, None);
         // 尖端
         assert_eq!(img.get_pixel(30, 10), &image::Rgba([255, 0, 0, 255]));
         // 主线中段
@@ -395,7 +392,7 @@ mod tests {
 
     #[test]
     fn mosaic_averages_blocks() {
-        let a = Annotation::Mosaic {
+        let a = Shape::Mosaic {
             min: [0.0, 0.0],
             max: [24.0, 12.0],
             block: 12,

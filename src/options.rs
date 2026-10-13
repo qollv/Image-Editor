@@ -96,7 +96,7 @@ impl TargetFormat {
         }
     }
 
-    pub fn to_image_format(&self) -> ImageFormat {
+    pub fn to_image_format(self) -> ImageFormat {
         match self {
             TargetFormat::Png => ImageFormat::Png,
             TargetFormat::Jpeg => ImageFormat::Jpeg,

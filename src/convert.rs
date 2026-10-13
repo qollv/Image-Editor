@@ -7,6 +7,8 @@ use crate::options::{ConvertOptions, PngCompression, TargetFormat};
 pub enum ConvertError {
     Io(std::io::Error),
     Image(image::ImageError),
+    /// 带水印转换但系统找不到可用字体
+    Font(String),
 }
 
 impl fmt::Display for ConvertError {
@@ -14,6 +16,7 @@ impl fmt::Display for ConvertError {
         match self {
             ConvertError::Io(e) => write!(f, "IO 错误: {}", e),
             ConvertError::Image(e) => write!(f, "图像错误: {}", e),
+            ConvertError::Font(msg) => write!(f, "字体错误: {}", msg),
         }
     }
 }
@@ -32,7 +35,7 @@ impl From<image::ImageError> for ConvertError {
 }
 
 /// 把带 alpha 的图合成到纯色背景上（用于 JPEG/BMP 等不支持透明的格式）。
-fn flatten_alpha(img: image::DynamicImage, bg: [u8; 3]) -> image::DynamicImage {
+pub fn flatten_alpha(img: image::DynamicImage, bg: [u8; 3]) -> image::DynamicImage {
     let rgba = img.to_rgba8();
     let mut rgb = image::RgbImage::new(rgba.width(), rgba.height());
     for (x, y, p) in rgba.enumerate_pixels() {
@@ -61,9 +64,14 @@ pub fn convert_file(input: &Path, output: &Path, opts: &ConvertOptions) -> Resul
         );
     }
 
-    // 文字水印
+    // 文字水印（字体全程只加载一次；加载失败返回错误，不再 panic）
     if !opts.watermark.trim().is_empty() {
-        apply_watermark(&mut img, opts.watermark.trim());
+        match crate::fonts::watermark_font() {
+            Some(font) => apply_watermark(&mut img, opts.watermark.trim(), font),
+            None => {
+                return Err(ConvertError::Font("未找到可用的水印字体".to_string()));
+            }
+        }
     }
 
     match opts.format {
@@ -77,28 +85,8 @@ pub fn convert_file(input: &Path, output: &Path, opts: &ConvertOptions) -> Resul
     }
 }
 
-fn load_watermark_font() -> fontdue::Font {
-    for p in [
-        "C:\\Windows\\Fonts\\msyh.ttc",
-        "C:\\Windows\\Fonts\\simhei.ttf",
-        "C:\\Windows\\Fonts\\arial.ttf",
-    ] {
-        if let Ok(bytes) = std::fs::read(p) {
-            let settings = fontdue::FontSettings {
-                collection_index: 0,
-                ..Default::default()
-            };
-            if let Ok(f) = fontdue::Font::from_bytes(bytes, settings) {
-                return f;
-            }
-        }
-    }
-    panic!("无法加载水印字体");
-}
-
 /// 在图片右下角叠加半透明白色文字水印。
-fn apply_watermark(img: &mut image::DynamicImage, text: &str) {
-    let font = load_watermark_font();
+fn apply_watermark(img: &mut image::DynamicImage, text: &str, font: &fontdue::Font) {
     let mut rgba = img.to_rgba8();
     let (w, h) = (rgba.width(), rgba.height());
     let font_size = (w as f32 * 0.04).clamp(14.0, 120.0);
@@ -197,8 +185,10 @@ mod tests {
         let img = RgbaImage::from_pixel(16, 16, Rgba([0, 0, 0, 0]));
         img.save(&src).unwrap();
 
-        let mut opts = ConvertOptions::default();
-        opts.format = TargetFormat::Jpeg;
+        let opts = ConvertOptions {
+            format: TargetFormat::Jpeg,
+            ..Default::default()
+        };
         convert_file(&src, &dst, &opts).unwrap();
 
         let out = image::open(&dst).unwrap().to_rgb8();
@@ -214,8 +204,10 @@ mod tests {
         let src = tmp_path("src2.png");
         let dst = tmp_path("out2.png");
         sample_rgba().save(&src).unwrap();
-        let mut opts = ConvertOptions::default();
-        opts.format = TargetFormat::Png;
+        let opts = ConvertOptions {
+            format: TargetFormat::Png,
+            ..Default::default()
+        };
         convert_file(&src, &dst, &opts).unwrap();
         let out = image::open(&dst).unwrap().to_rgba8();
         assert_eq!(out.get_pixel(1, 1), &Rgba([0, 0, 0, 0]));
@@ -228,8 +220,10 @@ mod tests {
         let src = tmp_path("src3.png");
         let dst = tmp_path("out3.webp");
         sample_rgba().save(&src).unwrap();
-        let mut opts = ConvertOptions::default();
-        opts.format = TargetFormat::Webp;
+        let opts = ConvertOptions {
+            format: TargetFormat::Webp,
+            ..Default::default()
+        };
         convert_file(&src, &dst, &opts).unwrap();
         let out = image::open(&dst).unwrap().to_rgba8();
         assert_eq!(out.dimensions(), (2, 2));
@@ -248,14 +242,51 @@ mod tests {
     }
 
     #[test]
+    fn convert_with_watermark_succeeds() {
+        // 水印路径：字体 OnceLock 全程一次加载 + 右下角文字叠加
+        let src = tmp_path("wm_src.png");
+        let dst = tmp_path("wm_out.png");
+        RgbaImage::new(64, 64).save(&src).unwrap();
+        let opts = ConvertOptions {
+            format: TargetFormat::Png,
+            watermark: "测试水印".to_string(),
+            ..Default::default()
+        };
+        convert_file(&src, &dst, &opts).unwrap();
+        let rgba = image::open(&dst).unwrap().to_rgba8();
+        // 水印为半透明白色（0.55 alpha 叠黑底 ≈ 140），应出现明显亮像素
+        let bright = rgba.pixels().filter(|p| p[0] > 100).count();
+        assert!(bright > 0, "水印文字应产生亮色像素");
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_file(&dst).ok();
+    }
+
+    #[test]
+    fn convert_to_ico_roundtrip() {
+        let src = tmp_path("ico_src.png");
+        let dst = tmp_path("ico_out.ico");
+        RgbaImage::new(16, 16).save(&src).unwrap();
+        let opts = ConvertOptions {
+            format: TargetFormat::Ico,
+            ..Default::default()
+        };
+        convert_file(&src, &dst, &opts).unwrap();
+        assert_eq!(image::open(&dst).unwrap().to_rgba8().dimensions(), (16, 16));
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_file(&dst).ok();
+    }
+
+    #[test]
     fn convert_resizes_width_keeping_ratio() {
         let src = tmp_path("src4.png");
         let dst = tmp_path("out4.png");
         let img = RgbaImage::new(100, 50);
         img.save(&src).unwrap();
-        let mut opts = ConvertOptions::default();
-        opts.format = TargetFormat::Png;
-        opts.resize_width = 50;
+        let opts = ConvertOptions {
+            format: TargetFormat::Png,
+            resize_width: 50,
+            ..Default::default()
+        };
         convert_file(&src, &dst, &opts).unwrap();
         let out = image::open(&dst).unwrap();
         assert_eq!(out.width(), 50);
@@ -270,9 +301,11 @@ mod tests {
         let dst = tmp_path("out5.png");
         let img = RgbaImage::new(100, 50);
         img.save(&src).unwrap();
-        let mut opts = ConvertOptions::default();
-        opts.format = TargetFormat::Png;
-        opts.resize_width = 0; // 不缩放
+        let opts = ConvertOptions {
+            format: TargetFormat::Png,
+            resize_width: 0, // 不缩放
+            ..Default::default()
+        };
         convert_file(&src, &dst, &opts).unwrap();
         let out = image::open(&dst).unwrap();
         assert_eq!(out.width(), 100);
